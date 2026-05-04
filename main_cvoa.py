@@ -76,6 +76,10 @@ def main():
 
     print(f"Max time: {max_time}")
 
+    # Calculamos el numero de reglas dinamico usando la raiz cuadrada del numero de instancias con un minimo de 10
+    n_solutions = int(max(10, np.sqrt(N)))
+    print(f"N solutions: {n_solutions}")
+
     # Contenedores de resultados
     epochs=[]
     iterations=[]
@@ -100,7 +104,7 @@ def main():
     mean_fitness_each_Iteration=[]
     std_fitness_each_Iteration=[]
 
-    cvoa = CVOA(max_time = max_time, data = data, n_solutions=100, objF = objF)
+    cvoa = CVOA(max_time = max_time, data = data, n_solutions=n_solutions, objF = objF)
 
     time1 = int(round(time.time() * 1000))
     solutions = cvoa.run() 

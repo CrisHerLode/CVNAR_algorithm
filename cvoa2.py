@@ -34,6 +34,27 @@ class CVOA:
         self.avgBestFitnessDistance = []
         self.objF = objF
     
+    def es_regla_distinta(self, nuevo_individuo, umbral_distancia=0.08):
+        """
+        Comprueba si el nuevo individuo es lo suficientemente distinto
+        de las reglas que ya están en el top (bestSolutions).
+        """
+        if not self.bestSolutions:
+            return True
+            
+        for regla_top in self.bestSolutions:
+            # Comparamos la estructura (si usan los mismos atributos como antecedente/consecuente)
+            misma_estructura = np.array_equal(nuevo_individuo.attributeType, regla_top.attributeType)
+            
+            # Comparamos la distancia de los intervalos
+            distancia = self.calcular_distancia(nuevo_individuo.values, regla_top.values)
+            
+            # Si tienen la misma estructura y sus valores son casi idénticos (clones)
+            if misma_estructura and distancia < umbral_distancia:
+                return False # No es distinta, la rechazamos
+                
+        return True # Ha superado el filtro, es una regla novedosa
+    
     def propagateDisease(self, time):
         new_infected_list = []
         # Step 1. Assess fitness for each individual.
@@ -55,23 +76,28 @@ class CVOA:
         
         # Step 2.1 Add individuals to the bestSolutions until n_solutions is reached
         i=0
-        while (len(self.bestSolutions)<self.n_solutions) and i<(len(self.infected)-1):
+        while (len(self.bestSolutions)<self.n_solutions) and i<(len(self.infected)):
             if self.infected[i] not in self.bestSolutions:
-                self.bestSolutions.append(deepcopy(self.infected[i]))
+                if self.es_regla_distinta(self.infected[i]):
+                    self.bestSolutions.append(deepcopy(self.infected[i]))
             i+=1
             
         self.bestSolutions = sorted(self.bestSolutions, key=lambda i: self.fitness(i.values,i.attributeType), reverse=True)
         # Step 3. Update best global solutions, if proceed.
         if self.n_solutions > 1:
-            i=0
-            while i < (len(self.bestSolutions)-1) and i < (len(self.infected)-1):
-                for j in range(i,len(self.bestSolutions)):
-                    if ((self.fitness(self.bestSolutions[j].values,self.bestSolutions[j].attributeType)==None) or (self.fitness(self.infected[i].values,self.infected[i].attributeType) > self.fitness(self.bestSolutions[j].values,self.bestSolutions[j].attributeType))) and self.infected[i] not in self.bestSolutions:
-                        self.bestSolutions[j] = deepcopy(self.infected[i])
-                        break
-                i=j
+            # Iteramos sobre los infectados para ver si alguno merece entrar al top
+            for i in range(len(self.infected)):
+                # Comprobamos si es mejor que el PEOR de nuestra lista top (que es el último [-1])
+                peor_top = self.bestSolutions[-1]
+                peor_fitness = self.fitness(peor_top.values, peor_top.attributeType)
+                if self.infected[i].fitness > peor_fitness and self.infected[i] not in self.bestSolutions:
+                    if self.es_regla_distinta(self.infected[i]):
+                        # Reemplazamos a la peor regla y volvemos a ordenar
+                        self.bestSolutions[-1] = deepcopy(self.infected[i])
+                        self.bestSolutions = sorted(self.bestSolutions, key=lambda ind: self.fitness(ind.values, ind.attributeType), reverse=True)
         else:
-            if self.fitness(self.bestSolutions[0].values,self.bestSolutions[0].attributeType)==None or self.fitness(self.infected[0].values,self.infected[0].attributeType) > self.fitness(self.bestSolutions[0].values,self.bestSolutions[0].attributeType):
+            best0_fitness = self.fitness(self.bestSolutions[0].values, self.bestSolutions[0].attributeType)
+            if best0_fitness is None or self.infected[0].fitness > best0_fitness:
                 self.bestSolutions[0] = deepcopy(self.infected[0])
         # Step 3.1 Calculate distance between the best solutions
         self.avgBestFitnessDistance.append(self.avgBestFitnessDist())
@@ -152,6 +178,7 @@ class CVOA:
         pz = Individual.random(self.data)
         while Individual.validateAttributeTypes(pz,pz.attributeType) == 0 or self.fitness(pz.values, pz.attributeType) == 0:
             pz = Individual.random(self.data)
+        pz.fitness = self.fitness(pz.values, pz.attributeType)
         self.infected.append(pz)
         print("Patient Zero: " + str(pz) + "\n")
         print("Patient Zero attribute values: " + str(pz.values) + "\n")
