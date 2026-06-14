@@ -29,10 +29,10 @@ RULE_RE = re.compile(
 ATTR_RE = re.compile(r"A(\d+)\s*\[([0-9.]+),([0-9.]+)\]")
 
 
-def resolve_top_file(path_like: str) -> Path:
+def resolve_top_file(path_like: str, top_file_name: str = "top10_reglas_finales.txt") -> Path:
     p = Path(path_like).expanduser().resolve()
     if p.is_dir():
-        p = p / "top10_reglas_finales.txt"
+        p = p / top_file_name
     return p
 
 
@@ -340,6 +340,21 @@ def main() -> int:
     parser.add_argument("a", help="Archivo o carpeta A")
     parser.add_argument("b", help="Archivo o carpeta B")
     parser.add_argument(
+        "--top-file-name",
+        default="top10_reglas_finales.txt",
+        help="Nombre del fichero de reglas cuando A/B son carpetas.",
+    )
+    parser.add_argument(
+        "--top-file-name-a",
+        default=None,
+        help="Nombre del fichero de reglas para A cuando A es carpeta (prioriza sobre --top-file-name).",
+    )
+    parser.add_argument(
+        "--top-file-name-b",
+        default=None,
+        help="Nombre del fichero de reglas para B cuando B es carpeta (prioriza sobre --top-file-name).",
+    )
+    parser.add_argument(
         "--csv",
         default=None,
         help="CSV para evaluacion externa de ambos conjuntos (mismo separador ';' que main_cvoa).",
@@ -356,8 +371,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    pa = resolve_top_file(args.a)
-    pb = resolve_top_file(args.b)
+    top_name_a = args.top_file_name_a if args.top_file_name_a else args.top_file_name
+    top_name_b = args.top_file_name_b if args.top_file_name_b else args.top_file_name
+    pa = resolve_top_file(args.a, top_name_a)
+    pb = resolve_top_file(args.b, top_name_b)
 
     if not pa.is_file():
         print(f"No existe archivo A: {pa}")

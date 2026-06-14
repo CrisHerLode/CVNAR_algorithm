@@ -24,8 +24,8 @@ from support_function import generate_rules
 
 UMBRAL_DISTANCIA_REGLAS_DEFAULT = 0.08
 TOP_RUNS_TO_MERGE_DEFAULT = 3
-TOP_FINAL_RULES_DEFAULT = 10
-OUTPUT_TOP_RULES_TXT_DEFAULT = "top10_reglas_finales.txt"
+TOP_FINAL_RULES_DEFAULT = None
+OUTPUT_TOP_RULES_TXT_DEFAULT = "top_reglas_finales.txt"
 LOG_GLOB_DEFAULT = "run_*.txt"
 
 
@@ -115,9 +115,18 @@ def parse_log_file(path):
         "best": None,
         "covered": None,
         "diversity": None,
+        "n_solutions": None,
         "best_fitness_list": [],
         "intervals_values": [],
         "attribute_type_values": [],
+        "ant_support_list": [],
+        "cons_support_list": [],
+        "rule_support_list": [],
+        "confidence_list": [],
+        "lift_list": [],
+        "accuracy_list": [],
+        "support_metric_list": [],
+        "cf_list": [],
     }
 
     m_time = re.search(r"Execution time:\s*([0-9.]+)\s*mins", txt)
@@ -132,6 +141,10 @@ def parse_log_file(path):
     if m_cov:
         row["covered"] = int(m_cov.group(1))
 
+    m_nsol = re.search(r"N solutions:\s*([0-9]+)", txt)
+    if m_nsol:
+        row["n_solutions"] = int(m_nsol.group(1))
+
     best_fitness_list = extract_list_after("Best fitness:", txt)
     if isinstance(best_fitness_list, list):
         row["best_fitness_list"] = best_fitness_list
@@ -144,6 +157,38 @@ def parse_log_file(path):
     attribute_types = extract_list_after("Attribute type values:", txt)
     if isinstance(attribute_types, list) and attribute_types and isinstance(attribute_types[0], list):
         row["attribute_type_values"] = attribute_types
+
+    ant_support = extract_list_after("Ant support:", txt)
+    if isinstance(ant_support, list):
+        row["ant_support_list"] = ant_support
+
+    cons_support = extract_list_after("Cons support:", txt)
+    if isinstance(cons_support, list):
+        row["cons_support_list"] = cons_support
+
+    rule_support = extract_list_after("Rules support:", txt)
+    if isinstance(rule_support, list):
+        row["rule_support_list"] = rule_support
+
+    confidence = extract_list_after("Confidence metric:", txt)
+    if isinstance(confidence, list):
+        row["confidence_list"] = confidence
+
+    lift = extract_list_after("Lift metric:", txt)
+    if isinstance(lift, list):
+        row["lift_list"] = lift
+
+    accuracy = extract_list_after("Accuracy metric:", txt)
+    if isinstance(accuracy, list):
+        row["accuracy_list"] = accuracy
+
+    support_metric = extract_list_after("Support metric:", txt)
+    if isinstance(support_metric, list):
+        row["support_metric_list"] = support_metric
+
+    cf = extract_list_after("Certainty Factor metric:", txt)
+    if isinstance(cf, list):
+        row["cf_list"] = cf
 
     return row
 
@@ -199,7 +244,7 @@ def add_summary_arguments(p):
         type=int,
         default=TOP_FINAL_RULES_DEFAULT,
         metavar="N",
-        help="Reglas maximas en la salida",
+        help="Reglas maximas en la salida (por defecto: N solutions detectado en logs)",
     )
 
 
@@ -283,7 +328,16 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         )
 
     top_merge = max(1, sargs.top_merge)
-    top_rules = max(1, sargs.top_rules)
+
+    auto_top_rules = None
+    for r in ranked[:top_merge]:
+        if r.get("n_solutions") is not None:
+            auto_top_rules = max(1, int(r["n_solutions"]))
+            break
+    if auto_top_rules is None:
+        auto_top_rules = 10
+
+    top_rules = max(1, int(sargs.top_rules)) if sargs.top_rules is not None else auto_top_rules
 
     candidate_rules = []
     for r in ranked[:top_merge]:
@@ -295,6 +349,14 @@ def execute_summary(sargs: SimpleNamespace) -> int:
                     "fitness": r["best_fitness_list"][i],
                     "values": r["intervals_values"][i],
                     "attribute_type": r["attribute_type_values"][i],
+                    "ant_support": r["ant_support_list"][i] if i < len(r["ant_support_list"]) else None,
+                    "cons_support": r["cons_support_list"][i] if i < len(r["cons_support_list"]) else None,
+                    "rule_support": r["rule_support_list"][i] if i < len(r["rule_support_list"]) else None,
+                    "confidence": r["confidence_list"][i] if i < len(r["confidence_list"]) else None,
+                    "lift": r["lift_list"][i] if i < len(r["lift_list"]) else None,
+                    "accuracy": r["accuracy_list"][i] if i < len(r["accuracy_list"]) else None,
+                    "support_metric": r["support_metric_list"][i] if i < len(r["support_metric_list"]) else None,
+                    "cf": r["cf_list"][i] if i < len(r["cf_list"]) else None,
                 }
             )
 
@@ -310,7 +372,7 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     print("\n=== TOP REGLAS FINALES (MERGE) ===")
     print(
         f"Configuracion: top_runs={top_merge}, top_rules={top_rules}, "
-        f"umbral_distancia={umbral}"
+        f"umbral_distancia={umbral}, top_rules_source={'--top-rules' if sargs.top_rules is not None else 'auto(n_solutions)'}"
     )
     if not selected_rules:
         print("No se pudieron construir reglas finales (faltan listas en los logs).")
@@ -319,6 +381,15 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     for i, rule in enumerate(selected_rules, start=1):
         print(f" {i}. {rule_pretty_line(rule['values'], rule['attribute_type'])}")
         print(f"    fitness={rule['fitness']:.6f} | run={rule['source_run']}")
+        print(
+            "    metrics: "
+            f"ant_sup={rule['ant_support']} | cons_sup={rule['cons_support']} | rule_sup={rule['rule_support']} | "
+            f"conf={rule['confidence'] if rule['confidence'] is not None else 'NA'} | "
+            f"lift={rule['lift'] if rule['lift'] is not None else 'NA'} | "
+            f"acc={rule['accuracy'] if rule['accuracy'] is not None else 'NA'} | "
+            f"sup={rule['support_metric'] if rule['support_metric'] is not None else 'NA'} | "
+            f"cf={rule['cf'] if rule['cf'] is not None else 'NA'}"
+        )
 
     out_path = sargs.output_abs
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -339,6 +410,15 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     for i, rule in enumerate(selected_rules, start=1):
         lines.append(f"{i}. {rule_pretty_line(rule['values'], rule['attribute_type'])}")
         lines.append(f"   # fitness={rule['fitness']:.6f} | run={rule['source_run']}")
+        lines.append(
+            "   # metrics: "
+            f"ant_sup={rule['ant_support']} | cons_sup={rule['cons_support']} | rule_sup={rule['rule_support']} | "
+            f"conf={rule['confidence'] if rule['confidence'] is not None else 'NA'} | "
+            f"lift={rule['lift'] if rule['lift'] is not None else 'NA'} | "
+            f"acc={rule['accuracy'] if rule['accuracy'] is not None else 'NA'} | "
+            f"sup={rule['support_metric'] if rule['support_metric'] is not None else 'NA'} | "
+            f"cf={rule['cf'] if rule['cf'] is not None else 'NA'}"
+        )
         lines.append("")
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
@@ -410,7 +490,7 @@ def run_batch(args: argparse.Namespace) -> int:
         output_abs=output_abs,
         umbral=args.umbral_distancia,
         top_merge=max(1, args.merge_runs),
-        top_rules=max(1, args.top_rules),
+        top_rules=(max(1, args.top_rules) if args.top_rules is not None else None),
     )
     print("\n=== Resumen multiobjetivo (post-batch) ===\n")
     rc = execute_summary(summary_ns)
@@ -482,7 +562,7 @@ def main(argv=None):
             output_abs=output_abs,
             umbral=args.umbral_distancia,
             top_merge=max(1, args.merge_runs),
-            top_rules=max(1, args.top_rules),
+            top_rules=(max(1, args.top_rules) if args.top_rules is not None else None),
         )
         return execute_summary(summary_ns)
 
