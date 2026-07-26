@@ -100,6 +100,8 @@ def main():
     leverage2_metric=[]
     accuracy2_metric=[]
     gain=[]
+    wracc_metric=[]
+    conviction_metric=[]
     best_fitness_each_Iteration=[]
     mean_fitness_each_Iteration=[]
     std_fitness_each_Iteration=[]
@@ -131,6 +133,8 @@ def main():
         leverage2_metric.append(calculateMetrics[7])
         accuracy2_metric.append(calculateMetrics[8])
         gain.append(calculateMetrics[9])
+        wracc_metric.append(calculateMetrics[10])
+        conviction_metric.append(calculateMetrics[11])
 
     iterations = range(1,max_time+1)
     best_fitness_each_Iteration = cvoa.getBestFitnessEachIt()
@@ -160,6 +164,8 @@ def main():
     print("Certainty Factor metric: " + str(cf_metric))
     print("Certainty Factor metric 2: " + str(cf2_metric))
     print("Gain: " + str(gain))
+    print("WRAcc: " + str(wracc_metric))
+    print("Conviction: " + str(conviction_metric))
     print("Covered records number: " + str(calculateRegCov))
     rules = generate_rules(best_values,best_attributeType)
     for rule in rules:

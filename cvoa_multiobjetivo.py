@@ -21,12 +21,22 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from support_function import generate_rules
+from calc_metric_function import metrics_from_supports
 
-UMBRAL_DISTANCIA_REGLAS_DEFAULT = 0.08
+UMBRAL_DISTANCIA_REGLAS_DEFAULT = 0.05
 TOP_RUNS_TO_MERGE_DEFAULT = 3
 TOP_FINAL_RULES_DEFAULT = None
 OUTPUT_TOP_RULES_TXT_DEFAULT = "top_reglas_finales.txt"
 LOG_GLOB_DEFAULT = "run_*.txt"
+MIN_LIFT_DEFAULT = 1.0
+MIN_SUPPORT_FRAC_DEFAULT = 0.02
+INTERVAL_FULL_LOW = 0.0
+INTERVAL_FULL_HIGH = 1.0
+INTERVAL_EPS = 1e-6
+# Ranking multiobjetivo de runs (must sum to 1.0)
+W_FITNESS = 0.30
+W_COVERED = 0.30
+W_DIVERSITY = 0.40
 
 
 def avg_pairwise_distance(vectors):
@@ -95,6 +105,85 @@ def is_distinct_rule(candidate, selected, threshold):
     return True
 
 
+def active_interval_pairs(values, attribute_type):
+    pairs = []
+    n = len(attribute_type) // 2
+    for i in range(n):
+        lo_idx = i * 2
+        hi_idx = lo_idx + 1
+        role = attribute_type[lo_idx]
+        if role in (1, 2):
+            pairs.append((values[lo_idx], values[hi_idx]))
+    return pairs
+
+
+def is_catch_all_rule(values, attribute_type):
+    pairs = active_interval_pairs(values, attribute_type)
+    if not pairs:
+        return True
+    return all(
+        abs(lo - INTERVAL_FULL_LOW) <= INTERVAL_EPS and abs(hi - INTERVAL_FULL_HIGH) <= INTERVAL_EPS
+        for lo, hi in pairs
+    )
+
+
+def infer_dataset_size(run_rows, candidate_rules):
+    sizes = []
+    for row in run_rows:
+        if row.get("n_rows") is not None:
+            sizes.append(int(row["n_rows"]))
+    if sizes:
+        return max(sizes)
+    for row in run_rows:
+        if row.get("covered") is not None:
+            sizes.append(int(row["covered"]))
+    for rule in candidate_rules:
+        for key in ("rule_support", "ant_support", "cons_support"):
+            val = rule.get(key)
+            if val is not None:
+                sizes.append(int(val))
+    return max(sizes) if sizes else None
+
+
+def min_rule_support_required(dataset_size, min_support_frac, min_rule_support_abs):
+    if min_rule_support_abs is not None:
+        return max(1, int(min_rule_support_abs))
+    if dataset_size is None or min_support_frac is None:
+        return 1
+    return max(2, math.ceil(dataset_size * min_support_frac))
+
+
+def passes_quality_filter(
+    rule,
+    *,
+    min_lift,
+    min_support_frac,
+    min_rule_support_abs,
+    dataset_size,
+    enabled,
+):
+    if not enabled:
+        return True, None
+
+    if is_catch_all_rule(rule["values"], rule["attribute_type"]):
+        return False, "catch_all"
+
+    lift = rule.get("lift")
+    if lift is None:
+        return False, "sin_lift"
+    if lift <= min_lift:
+        return False, "lift_bajo"
+
+    min_support = min_rule_support_required(dataset_size, min_support_frac, min_rule_support_abs)
+    rule_support = rule.get("rule_support")
+    if rule_support is None:
+        return False, "sin_rule_support"
+    if int(rule_support) < min_support:
+        return False, "support_bajo"
+
+    return True, None
+
+
 def rule_body_to_string(values, attribute_types):
     rules = generate_rules([values], [attribute_types])
     return rules[0] if rules else ""
@@ -107,6 +196,51 @@ def rule_pretty_line(values, attribute_types):
     return f"Rule:  {body}"
 
 
+def enrich_rule_extra_metrics(rule, dataset_size):
+    """Add gain/leverage/wracc/conviction derived from supports."""
+    extra = {
+        "gain": None,
+        "leverage": None,
+        "wracc": None,
+        "conviction": None,
+    }
+    if (
+        dataset_size is not None
+        and rule.get("ant_support") is not None
+        and rule.get("cons_support") is not None
+        and rule.get("rule_support") is not None
+    ):
+        extra = metrics_from_supports(
+            rule["ant_support"],
+            rule["cons_support"],
+            rule["rule_support"],
+            int(dataset_size),
+        )
+    rule.update(extra)
+    return rule
+
+
+def format_rule_metrics_line(rule):
+    def fmt(v, digits=6):
+        if v is None:
+            return "NA"
+        if isinstance(v, float) and math.isinf(v):
+            return "inf"
+        if isinstance(v, float):
+            return f"{v:.{digits}g}"
+        return str(v)
+
+    return (
+        "metrics: "
+        f"ant_sup={rule['ant_support']} | cons_sup={rule['cons_support']} | rule_sup={rule['rule_support']} | "
+        f"conf={fmt(rule.get('confidence'))} | lift={fmt(rule.get('lift'))} | "
+        f"acc={fmt(rule.get('accuracy'))} | sup={fmt(rule.get('support_metric'))} | "
+        f"cf={fmt(rule.get('cf'))} | gain={fmt(rule.get('gain'))} | "
+        f"leverage={fmt(rule.get('leverage'))} | wracc={fmt(rule.get('wracc'))} | "
+        f"conviction={fmt(rule.get('conviction'))}"
+    )
+
+
 def parse_log_file(path):
     txt = read_log_text(path)
     row = {
@@ -116,6 +250,7 @@ def parse_log_file(path):
         "covered": None,
         "diversity": None,
         "n_solutions": None,
+        "n_rows": None,
         "best_fitness_list": [],
         "intervals_values": [],
         "attribute_type_values": [],
@@ -132,6 +267,10 @@ def parse_log_file(path):
     m_time = re.search(r"Execution time:\s*([0-9.]+)\s*mins", txt)
     if m_time:
         row["time"] = float(m_time.group(1))
+
+    m_n = re.search(r"\bN:\s*([0-9]+)\s*,\s*M:\s*([0-9]+)", txt)
+    if m_n:
+        row["n_rows"] = int(m_n.group(1))
 
     m_best = re.search(r"Best fitness:\s*\[([^\]]+)\]", txt)
     if m_best:
@@ -246,10 +385,36 @@ def add_summary_arguments(p):
         metavar="N",
         help="Reglas maximas en la salida (por defecto: N solutions detectado en logs)",
     )
+    p.add_argument(
+        "--no-quality-filter",
+        action="store_true",
+        help="No filtrar reglas triviales (catch-all), de bajo lift o bajo support",
+    )
+    p.add_argument(
+        "--min-lift",
+        type=float,
+        default=MIN_LIFT_DEFAULT,
+        metavar="L",
+        help=f"Lift minimo estricto (por defecto: {MIN_LIFT_DEFAULT})",
+    )
+    p.add_argument(
+        "--min-support-frac",
+        type=float,
+        default=MIN_SUPPORT_FRAC_DEFAULT,
+        metavar="F",
+        help=f"Support minimo como fraccion del dataset (por defecto: {MIN_SUPPORT_FRAC_DEFAULT})",
+    )
+    p.add_argument(
+        "--min-rule-support",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Support minimo absoluto en filas (anula el calculo por fraccion)",
+    )
 
 
 def execute_summary(sargs: SimpleNamespace) -> int:
-    """sargs: logs_dir_abs, log_glob, output_abs, umbral, top_merge, top_rules."""
+    """sargs: logs_dir_abs, log_glob, output_abs, umbral, top_merge, top_rules, quality filter opts."""
     logs_dir_abs = sargs.logs_dir_abs
     if not os.path.isdir(logs_dir_abs):
         print(
@@ -310,12 +475,15 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         b = minmax_norm(r["best"], bmin, bmax)
         c = minmax_norm(r["covered"], cmin, cmax)
         d = minmax_norm(r["diversity"], dmin, dmax)
-        r["score"] = 0.40 * b + 0.30 * c + 0.30 * d
+        r["score"] = W_FITNESS * b + W_COVERED * c + W_DIVERSITY * d
 
     ranked = sorted(valid, key=lambda x: x["score"], reverse=True)
     best = ranked[0]
     print("\n=== RANKING MULTIOBJETIVO ===")
-    print("Pesos: 0.40*best_fitness + 0.30*covered_records + 0.30*diversity")
+    print(
+        f"Pesos: {W_FITNESS:.2f}*best_fitness + {W_COVERED:.2f}*covered_records + "
+        f"{W_DIVERSITY:.2f}*diversity"
+    )
     print(
         f"Mejor run: {best['run']} | score={best['score']:.6f} | "
         f"best={best['best']:.6f} | covered={best['covered']} | diversity={best['diversity']:.6f}"
@@ -328,9 +496,14 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         )
 
     top_merge = max(1, sargs.top_merge)
+    quality_filter = not getattr(sargs, "no_quality_filter", False)
+    min_lift = getattr(sargs, "min_lift", MIN_LIFT_DEFAULT)
+    min_support_frac = getattr(sargs, "min_support_frac", MIN_SUPPORT_FRAC_DEFAULT)
+    min_rule_support_abs = getattr(sargs, "min_rule_support", None)
 
     auto_top_rules = None
-    for r in ranked[:top_merge]:
+    pool_runs = ranked if quality_filter else ranked[:top_merge]
+    for r in pool_runs[:top_merge]:
         if r.get("n_solutions") is not None:
             auto_top_rules = max(1, int(r["n_solutions"]))
             break
@@ -340,7 +513,7 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     top_rules = max(1, int(sargs.top_rules)) if sargs.top_rules is not None else auto_top_rules
 
     candidate_rules = []
-    for r in ranked[:top_merge]:
+    for r in pool_runs:
         n = min(len(r["best_fitness_list"]), len(r["intervals_values"]), len(r["attribute_type_values"]))
         for i in range(n):
             candidate_rules.append(
@@ -360,36 +533,62 @@ def execute_summary(sargs: SimpleNamespace) -> int:
                 }
             )
 
+    dataset_size = infer_dataset_size(run_rows, candidate_rules)
+    min_support_required = min_rule_support_required(dataset_size, min_support_frac, min_rule_support_abs)
+
     candidate_rules.sort(key=lambda x: x["fitness"], reverse=True)
     selected_rules = []
+    rejected_counts = {}
     umbral = sargs.umbral
     for cand in candidate_rules:
+        ok, reason = passes_quality_filter(
+            cand,
+            min_lift=min_lift,
+            min_support_frac=min_support_frac,
+            min_rule_support_abs=min_rule_support_abs,
+            dataset_size=dataset_size,
+            enabled=quality_filter,
+        )
+        if not ok:
+            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
+            continue
         if is_distinct_rule(cand, selected_rules, umbral):
             selected_rules.append(cand)
         if len(selected_rules) == top_rules:
             break
 
     print("\n=== TOP REGLAS FINALES (MERGE) ===")
+    pool_label = f"all_runs({len(pool_runs)})" if quality_filter else f"top_runs={top_merge}"
     print(
-        f"Configuracion: top_runs={top_merge}, top_rules={top_rules}, "
+        f"Configuracion: pool={pool_label}, top_rules={top_rules}, "
         f"umbral_distancia={umbral}, top_rules_source={'--top-rules' if sargs.top_rules is not None else 'auto(n_solutions)'}"
     )
+    if quality_filter:
+        print(
+            f"Filtro calidad: lift>{min_lift}, rule_support>={min_support_required} "
+            f"(dataset~{dataset_size if dataset_size is not None else 'NA'}, frac={min_support_frac})"
+        )
+        if rejected_counts:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(rejected_counts.items()))
+            print(f"Reglas descartadas por filtro: {parts}")
+    else:
+        print("Filtro calidad: desactivado (--no-quality-filter)")
     if not selected_rules:
-        print("No se pudieron construir reglas finales (faltan listas en los logs).")
+        print("No se pudieron construir reglas finales (faltan listas en los logs o filtro muy estricto).")
+        if quality_filter:
+            print(
+                "Sugerencia: prueba --no-quality-filter, baja --min-lift, "
+                "reduce --min-support-frac o aumenta --merge-runs."
+            )
         return 0
+
+    for rule in selected_rules:
+        enrich_rule_extra_metrics(rule, dataset_size)
 
     for i, rule in enumerate(selected_rules, start=1):
         print(f" {i}. {rule_pretty_line(rule['values'], rule['attribute_type'])}")
         print(f"    fitness={rule['fitness']:.6f} | run={rule['source_run']}")
-        print(
-            "    metrics: "
-            f"ant_sup={rule['ant_support']} | cons_sup={rule['cons_support']} | rule_sup={rule['rule_support']} | "
-            f"conf={rule['confidence'] if rule['confidence'] is not None else 'NA'} | "
-            f"lift={rule['lift'] if rule['lift'] is not None else 'NA'} | "
-            f"acc={rule['accuracy'] if rule['accuracy'] is not None else 'NA'} | "
-            f"sup={rule['support_metric'] if rule['support_metric'] is not None else 'NA'} | "
-            f"cf={rule['cf'] if rule['cf'] is not None else 'NA'}"
-        )
+        print(f"    {format_rule_metrics_line(rule)}")
 
     out_path = sargs.output_abs
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -398,33 +597,52 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         f"# Generado: {datetime.now().isoformat(timespec='seconds')}",
         f"# Logs en: {logs_dir_abs}",
         f"# Glob: {sargs.log_glob}",
-        "# Pesos ranking runs: 0.40*best_fitness_norm + 0.30*covered_records_norm + 0.30*diversity_norm",
+        f"# Pesos ranking runs: {W_FITNESS:.2f}*best_fitness_norm + "
+        f"{W_COVERED:.2f}*covered_records_norm + {W_DIVERSITY:.2f}*diversity_norm",
         f"# Mejor run: {best['run']} | score={best['score']:.6f}",
         f"# Runs fusionados para reglas ({top_merge}): "
         + ", ".join(r["run"] for r in ranked[:top_merge]),
         f"# Umbral_distancia_duplicadas (solo si misma estructura attribute_type): {umbral}",
+    ]
+    if quality_filter:
+        lines.append(
+            f"# Filtro calidad: lift>{min_lift}, rule_support>={min_support_required}, "
+            f"sin catch-all; pool={pool_label}"
+        )
+    else:
+        lines.append("# Filtro calidad: desactivado")
+    lines.extend(
+        [
         "",
         f"TOTAL_REGLAS_SELECCIONADAS: {len(selected_rules)}",
         "",
-    ]
+        ]
+    )
     for i, rule in enumerate(selected_rules, start=1):
         lines.append(f"{i}. {rule_pretty_line(rule['values'], rule['attribute_type'])}")
         lines.append(f"   # fitness={rule['fitness']:.6f} | run={rule['source_run']}")
-        lines.append(
-            "   # metrics: "
-            f"ant_sup={rule['ant_support']} | cons_sup={rule['cons_support']} | rule_sup={rule['rule_support']} | "
-            f"conf={rule['confidence'] if rule['confidence'] is not None else 'NA'} | "
-            f"lift={rule['lift'] if rule['lift'] is not None else 'NA'} | "
-            f"acc={rule['accuracy'] if rule['accuracy'] is not None else 'NA'} | "
-            f"sup={rule['support_metric'] if rule['support_metric'] is not None else 'NA'} | "
-            f"cf={rule['cf'] if rule['cf'] is not None else 'NA'}"
-        )
+        lines.append(f"   # {format_rule_metrics_line(rule)}")
         lines.append("")
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines).rstrip() + "\n")
     print(f"\nEscrito: {out_path}")
     return 0
+
+
+def summary_namespace_from_args(args, logs_dir_abs, output_abs):
+    return SimpleNamespace(
+        logs_dir_abs=logs_dir_abs,
+        log_glob=args.log_glob,
+        output_abs=output_abs,
+        umbral=args.umbral_distancia,
+        top_merge=max(1, args.merge_runs),
+        top_rules=(max(1, args.top_rules) if args.top_rules is not None else None),
+        no_quality_filter=args.no_quality_filter,
+        min_lift=args.min_lift,
+        min_support_frac=args.min_support_frac,
+        min_rule_support=args.min_rule_support,
+    )
 
 
 def run_batch(args: argparse.Namespace) -> int:
@@ -484,14 +702,7 @@ def run_batch(args: argparse.Namespace) -> int:
         os.path.abspath(args.output) if args.output else os.path.join(logs_dir_abs, OUTPUT_TOP_RULES_TXT_DEFAULT)
     )
 
-    summary_ns = SimpleNamespace(
-        logs_dir_abs=logs_dir_abs,
-        log_glob=args.log_glob,
-        output_abs=output_abs,
-        umbral=args.umbral_distancia,
-        top_merge=max(1, args.merge_runs),
-        top_rules=(max(1, args.top_rules) if args.top_rules is not None else None),
-    )
+    summary_ns = summary_namespace_from_args(args, logs_dir_abs, output_abs)
     print("\n=== Resumen multiobjetivo (post-batch) ===\n")
     rc = execute_summary(summary_ns)
     return rc if rc != 0 else min(1, failures)
@@ -556,14 +767,7 @@ def main(argv=None):
             if args.output
             else os.path.join(logs_dir_abs, OUTPUT_TOP_RULES_TXT_DEFAULT)
         )
-        summary_ns = SimpleNamespace(
-            logs_dir_abs=logs_dir_abs,
-            log_glob=args.log_glob,
-            output_abs=output_abs,
-            umbral=args.umbral_distancia,
-            top_merge=max(1, args.merge_runs),
-            top_rules=(max(1, args.top_rules) if args.top_rules is not None else None),
-        )
+        summary_ns = summary_namespace_from_args(args, logs_dir_abs, output_abs)
         return execute_summary(summary_ns)
 
     return 2

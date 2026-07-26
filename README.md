@@ -27,14 +27,21 @@ Useful options:
 
 - `--merge-runs K`: how many top runs are merged
 - `--top-rules N`: final number of rules (default: detected automatically from `N solutions` in logs)
-- `--umbral-distancia EPS`: dedup threshold for same `attribute_type` structure
+- `--umbral-distancia EPS`: dedup threshold for same `attribute_type` structure (default: `0.05`)
+- Ranking weights for runs: `0.30*fitness + 0.30*coverage + 0.40*diversity`
 - `--output FILE`: output filename/path for final rules file
+- **Quality filter (on by default):** drops catch-all rules (`[0,1]` intervals), rules with `lift <= 1`, and rules with low support
+- `--min-lift L`: minimum lift (default: `1.0`, strict `>`)
+- `--min-support-frac F`: minimum support as dataset fraction (default: `0.02`, at least 2 rows)
+- `--min-rule-support N`: absolute minimum support in rows (overrides fraction)
+- `--no-quality-filter`: disable quality filtering (legacy behaviour)
 
 Generated top-rules file includes, for each rule:
 
 - rule text (`Rule: A... -> A...`)
 - origin run and fitness
-- per-rule metrics (`ant_sup`, `cons_sup`, `rule_sup`, `conf`, `lift`, `acc`, `sup`, `cf`)
+- per-rule metrics (`ant_sup`, `cons_sup`, `rule_sup`, `conf`, `lift`, `acc`, `sup`, `cf`,
+  `gain`, `leverage`, `wracc`, `conviction`)
 
 ### 3) Compare two top-rule sets (e.g., objf1 vs objf2)
 
@@ -44,6 +51,15 @@ python comparar_top_reglas.py ./PATH_A/runs_umbral ./PATH_B/runs_umbral_fobj2 \
   --top-file-name-b top_reglas_finales_fobj2.txt \
   --csv ./PATH_DATASET/NAME_DATASET.csv \
   --out-path ./PATH_REPORTS/comparacion_top_reglas.txt
+```
+
+### 3b) Single top-rule report (e.g., only objf2 when objf1 has no valid rules)
+
+```bash
+python comparar_top_reglas.py ./PATH_OUTPUT/runs_umbral_fobj2 --solo \
+  --top-file-name-a top_reglas_finales_fobj2.txt \
+  --csv ./PATH_DATASET/NAME_DATASET.csv \
+  --out-path ./PATH_REPORTS/reporte_top_reglas_fobj2.txt
 ```
 
 Comparison report includes:
