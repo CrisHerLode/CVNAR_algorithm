@@ -30,6 +30,7 @@ OUTPUT_TOP_RULES_TXT_DEFAULT = "top_reglas_finales.txt"
 LOG_GLOB_DEFAULT = "run_*.txt"
 MIN_LIFT_DEFAULT = 1.0
 MIN_SUPPORT_FRAC_DEFAULT = 0.02
+MAX_PER_STRUCTURE_TOP_DEFAULT = 2
 INTERVAL_FULL_LOW = 0.0
 INTERVAL_FULL_HIGH = 1.0
 INTERVAL_EPS = 1e-6
@@ -97,12 +98,11 @@ def euclidean_distance(v1, v2):
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(v1, v2)))
 
 
-def is_distinct_rule(candidate, selected, threshold):
-    for rule in selected:
-        if candidate["attribute_type"] == rule["attribute_type"]:
-            if euclidean_distance(candidate["values"], rule["values"]) < threshold:
-                return False
-    return True
+def is_full_interval(lo, hi):
+    return (
+        abs(lo - INTERVAL_FULL_LOW) <= INTERVAL_EPS
+        and abs(hi - INTERVAL_FULL_HIGH) <= INTERVAL_EPS
+    )
 
 
 def active_interval_pairs(values, attribute_type):
@@ -117,14 +117,90 @@ def active_interval_pairs(values, attribute_type):
     return pairs
 
 
+def iter_active_conditions(values, attribute_type):
+    """Yield (attr_idx, role, lo, hi) for antecedent/consequent attributes."""
+    n = len(attribute_type) // 2
+    for i in range(n):
+        lo_idx = i * 2
+        hi_idx = lo_idx + 1
+        role = attribute_type[lo_idx]
+        if role in (1, 2):
+            yield i, int(role), float(values[lo_idx]), float(values[hi_idx])
+
+
+def active_values_vector(values, attribute_type):
+    """Endpoints of active (ant/cons) intervals only; ignores unused genes."""
+    vec = []
+    for lo, hi in active_interval_pairs(values, attribute_type):
+        vec.extend((lo, hi))
+    return vec
+
+
+def discriminative_signature(values, attribute_type):
+    """Canonical key ignoring unused genes and individual [0,1] conditions.
+
+    Rules that only differ by catch-all literals (e.g. adding A0 [0,1]) collapse
+    to the same signature and are treated as duplicates.
+    """
+    parts = []
+    for attr_idx, role, lo, hi in iter_active_conditions(values, attribute_type):
+        if is_full_interval(lo, hi):
+            continue
+        parts.append((attr_idx, role, round(lo, 6), round(hi, 6)))
+    return frozenset(parts)
+
+
+def structural_fingerprint(values, attribute_type):
+    """Attribute/role pairs of non-[0,1] conditions (interval-agnostic niche)."""
+    return frozenset(
+        (attr_idx, role)
+        for attr_idx, role, lo, hi in iter_active_conditions(values, attribute_type)
+        if not is_full_interval(lo, hi)
+    )
+
+
+def count_full_active_conditions(values, attribute_type):
+    return sum(
+        1
+        for _, _, lo, hi in iter_active_conditions(values, attribute_type)
+        if is_full_interval(lo, hi)
+    )
+
+
+def count_discriminative_conditions(values, attribute_type):
+    return sum(
+        1
+        for _, _, lo, hi in iter_active_conditions(values, attribute_type)
+        if not is_full_interval(lo, hi)
+    )
+
+
+def is_distinct_rule(candidate, selected, threshold):
+    """Drop duplicates: same printed rule, same discriminative signature, or close intervals."""
+    cand_text = rule_body_to_string(candidate["values"], candidate["attribute_type"])
+    cand_sig = discriminative_signature(candidate["values"], candidate["attribute_type"])
+    cand_active = active_values_vector(candidate["values"], candidate["attribute_type"])
+    for rule in selected:
+        if cand_text == rule_body_to_string(rule["values"], rule["attribute_type"]):
+            return False
+        other_sig = discriminative_signature(rule["values"], rule["attribute_type"])
+        if cand_sig and cand_sig == other_sig:
+            return False
+        if candidate["attribute_type"] == rule["attribute_type"]:
+            other_active = active_values_vector(rule["values"], rule["attribute_type"])
+            if len(cand_active) == len(other_active) and cand_active:
+                if euclidean_distance(cand_active, other_active) < threshold:
+                    return False
+            elif not cand_active and not other_active:
+                return False
+    return True
+
+
 def is_catch_all_rule(values, attribute_type):
     pairs = active_interval_pairs(values, attribute_type)
     if not pairs:
         return True
-    return all(
-        abs(lo - INTERVAL_FULL_LOW) <= INTERVAL_EPS and abs(hi - INTERVAL_FULL_HIGH) <= INTERVAL_EPS
-        for lo, hi in pairs
-    )
+    return all(is_full_interval(lo, hi) for lo, hi in pairs)
 
 
 def infer_dataset_size(run_rows, candidate_rules):
@@ -411,6 +487,16 @@ def add_summary_arguments(p):
         metavar="N",
         help="Support minimo absoluto en filas (anula el calculo por fraccion)",
     )
+    p.add_argument(
+        "--max-per-structure-top",
+        type=int,
+        default=MAX_PER_STRUCTURE_TOP_DEFAULT,
+        metavar="K",
+        help=(
+            "Maximo de reglas finales por huella estructural "
+            f"(atributos/roles no-[0,1]; por defecto: {MAX_PER_STRUCTURE_TOP_DEFAULT})"
+        ),
+    )
 
 
 def execute_summary(sargs: SimpleNamespace) -> int:
@@ -536,10 +622,18 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     dataset_size = infer_dataset_size(run_rows, candidate_rules)
     min_support_required = min_rule_support_required(dataset_size, min_support_frac, min_rule_support_abs)
 
-    candidate_rules.sort(key=lambda x: x["fitness"], reverse=True)
+    candidate_rules.sort(
+        key=lambda x: (
+            -(x["fitness"] if x["fitness"] is not None else float("-inf")),
+            count_full_active_conditions(x["values"], x["attribute_type"]),
+            -count_discriminative_conditions(x["values"], x["attribute_type"]),
+        )
+    )
     selected_rules = []
     rejected_counts = {}
+    structure_counts = {}
     umbral = sargs.umbral
+    max_per_structure_top = max(1, int(getattr(sargs, "max_per_structure_top", MAX_PER_STRUCTURE_TOP_DEFAULT)))
     for cand in candidate_rules:
         ok, reason = passes_quality_filter(
             cand,
@@ -552,8 +646,15 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         if not ok:
             rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
             continue
-        if is_distinct_rule(cand, selected_rules, umbral):
-            selected_rules.append(cand)
+        if not is_distinct_rule(cand, selected_rules, umbral):
+            rejected_counts["duplicada"] = rejected_counts.get("duplicada", 0) + 1
+            continue
+        fp = structural_fingerprint(cand["values"], cand["attribute_type"])
+        if structure_counts.get(fp, 0) >= max_per_structure_top:
+            rejected_counts["max_estructura"] = rejected_counts.get("max_estructura", 0) + 1
+            continue
+        selected_rules.append(cand)
+        structure_counts[fp] = structure_counts.get(fp, 0) + 1
         if len(selected_rules) == top_rules:
             break
 
@@ -561,24 +662,25 @@ def execute_summary(sargs: SimpleNamespace) -> int:
     pool_label = f"all_runs({len(pool_runs)})" if quality_filter else f"top_runs={top_merge}"
     print(
         f"Configuracion: pool={pool_label}, top_rules={top_rules}, "
-        f"umbral_distancia={umbral}, top_rules_source={'--top-rules' if sargs.top_rules is not None else 'auto(n_solutions)'}"
+        f"umbral_distancia={umbral}, max_per_structure_top={max_per_structure_top}, "
+        f"top_rules_source={'--top-rules' if sargs.top_rules is not None else 'auto(n_solutions)'}"
     )
     if quality_filter:
         print(
             f"Filtro calidad: lift>{min_lift}, rule_support>={min_support_required} "
             f"(dataset~{dataset_size if dataset_size is not None else 'NA'}, frac={min_support_frac})"
         )
-        if rejected_counts:
-            parts = ", ".join(f"{k}={v}" for k, v in sorted(rejected_counts.items()))
-            print(f"Reglas descartadas por filtro: {parts}")
     else:
         print("Filtro calidad: desactivado (--no-quality-filter)")
+    if rejected_counts:
+        parts = ", ".join(f"{k}={v}" for k, v in sorted(rejected_counts.items()))
+        print(f"Reglas descartadas: {parts}")
     if not selected_rules:
         print("No se pudieron construir reglas finales (faltan listas en los logs o filtro muy estricto).")
         if quality_filter:
             print(
                 "Sugerencia: prueba --no-quality-filter, baja --min-lift, "
-                "reduce --min-support-frac o aumenta --merge-runs."
+                "reduce --min-support-frac, aumenta --merge-runs o --max-per-structure-top."
             )
         return 0
 
@@ -602,7 +704,9 @@ def execute_summary(sargs: SimpleNamespace) -> int:
         f"# Mejor run: {best['run']} | score={best['score']:.6f}",
         f"# Runs fusionados para reglas ({top_merge}): "
         + ", ".join(r["run"] for r in ranked[:top_merge]),
-        f"# Umbral_distancia_duplicadas (solo si misma estructura attribute_type): {umbral}",
+        f"# Umbral_distancia_duplicadas (texto/firma discriminativa/[0,1] ignorados; "
+        f"misma estructura attribute_type en intervalos activos): {umbral}",
+        f"# Max reglas por estructura (attrs/roles no-[0,1]): {max_per_structure_top}",
     ]
     if quality_filter:
         lines.append(
@@ -642,6 +746,7 @@ def summary_namespace_from_args(args, logs_dir_abs, output_abs):
         min_lift=args.min_lift,
         min_support_frac=args.min_support_frac,
         min_rule_support=args.min_rule_support,
+        max_per_structure_top=args.max_per_structure_top,
     )
 
 
@@ -679,6 +784,18 @@ def run_batch(args: argparse.Namespace) -> int:
         print(f"\n=== Run {i}/{n} ===")
 
         cmd = [sys.executable, "-u", main_cvoa, csv_abs, objf, plot]
+        cmd.extend(["--amplitude-penalty", str(args.amplitude_penalty)])
+        if args.niching:
+            cmd.append("--niching")
+            cmd.extend(["--sharing-radius", str(args.sharing_radius)])
+            cmd.extend(["--sharing-alpha", str(args.sharing_alpha)])
+            cmd.extend(
+                ["--genotypic-distance-threshold", str(args.genotypic_distance_threshold)]
+            )
+            if args.max_per_structure is not None:
+                cmd.extend(["--max-per-structure", str(args.max_per_structure)])
+        else:
+            cmd.append("--no-niching")
         with open(log, "w", encoding="utf-8", newline="\n") as logf:
             proc = subprocess.run(
                 cmd,
@@ -733,6 +850,57 @@ def build_parser():
         "--no-summary",
         action="store_true",
         help="No ejecutar el resumen/reglas despues del batch",
+    )
+    p_batch.add_argument(
+        "--niching",
+        dest="niching",
+        action="store_true",
+        default=True,
+        help="Activar niching estructural dinamico en CVOA (default: on)",
+    )
+    p_batch.add_argument(
+        "--no-niching",
+        dest="niching",
+        action="store_false",
+        help="Desactivar niching estructural dinamico",
+    )
+    p_batch.add_argument(
+        "--sharing-radius",
+        type=float,
+        default=0.5,
+        metavar="SIGMA",
+        help="Radio de fitness sharing (distancia Jaccard estructural, default: 0.5)",
+    )
+    p_batch.add_argument(
+        "--sharing-alpha",
+        type=float,
+        default=1.0,
+        metavar="A",
+        help="Exponente de la funcion de sharing (default: 1.0)",
+    )
+    p_batch.add_argument(
+        "--max-per-structure",
+        type=int,
+        default=None,
+        metavar="K",
+        help="Maximo de reglas elite con la misma estructura de atributos",
+    )
+    p_batch.add_argument(
+        "--genotypic-distance-threshold",
+        type=float,
+        default=0.25,
+        metavar="D",
+        help="Distancia estructural minima para preferir otro donante de infeccion",
+    )
+    p_batch.add_argument(
+        "--amplitude-penalty",
+        type=float,
+        default=0.35,
+        metavar="W",
+        help=(
+            "Penalizar intervalos activos anchos: fitness *= 1 - W * mean_width "
+            "(default: 0.35; 0 desactiva)"
+        ),
     )
     add_summary_arguments(p_batch)
 

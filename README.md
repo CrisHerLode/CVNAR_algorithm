@@ -16,6 +16,15 @@ python cvoa_multiobjetivo.py batch ./PATH_DATASET/NAME_DATASET.csv --out-dir ./P
 - `--num-runs`: number of runs
 - `--out-dir`: folder for `run_*.txt`, `fitness_run_*.png`, and merged top rules
 - optional: `--no-summary` to skip automatic summary after batch
+- **Dynamic niching (on by default in CVOA):** structural fitness sharing + elite niche capacity
+  - `--sharing-radius SIGMA` (default `0.5`, Jaccard structural distance)
+  - `--sharing-alpha A` (default `1.0`)
+  - `--max-per-structure K` (default `n_solutions//4`)
+  - `--genotypic-distance-threshold D` (default `0.25`)
+  - `--no-niching` to disable
+- **Amplitude penalty (on by default):** `fitness *= 1 - W * mean_active_interval_width`
+  - `--amplitude-penalty W` (default `0.35`; `0` disables)
+  - Prefer narrower (more specific) intervals during search; reported fitness includes this factor
 
 ### 2) Summarize existing runs and generate final top rules
 
@@ -27,7 +36,9 @@ Useful options:
 
 - `--merge-runs K`: how many top runs are merged
 - `--top-rules N`: final number of rules (default: detected automatically from `N solutions` in logs)
-- `--umbral-distancia EPS`: dedup threshold for same `attribute_type` structure (default: `0.05`)
+- `--umbral-distancia EPS`: dedup threshold on active intervals for same `attribute_type` (default: `0.05`); exact printed duplicates and rules that only differ by `[0,1]` literals are always dropped
+- `--max-per-structure-top K`: max final rules sharing the same non-`[0,1]` attribute/role fingerprint (default: `2`)
+- Ranking prefers higher fitness, then fewer catch-all `[0,1]` conditions
 - Ranking weights for runs: `0.30*fitness + 0.30*coverage + 0.40*diversity`
 - `--output FILE`: output filename/path for final rules file
 - **Quality filter (on by default):** drops catch-all rules (`[0,1]` intervals), rules with `lift <= 1`, and rules with low support
