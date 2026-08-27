@@ -1,9 +1,9 @@
 """
 CVOA multiobjetivo: lanzar multiples corridas (main_cvoa.py) y/o resumen
-multiobjetivo sobre los logs (ranking, merge de reglas, top10_reglas_finales.txt).
+multiobjetivo sobre los logs (ranking, merge de reglas, top_reglas_finales.txt).
 
-  python cvoa_multiobjetivo.py batch ./lo/LO.csv --out-dir ./lo/runs_umbral --num-runs 30
-  python cvoa_multiobjetivo.py resumen ./lo/runs_umbral
+  python cvoa_multiobjetivo.py batch ./lo/LO.csv --out-dir ./lo/runs --num-runs 30 --variant niching-amp
+  python cvoa_multiobjetivo.py resumen ./lo/runs
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 from support_function import generate_rules
 from calc_metric_function import metrics_from_supports
+from main_cvoa import DEFAULT_VARIANT, VARIANT_CHOICES, variant_help_text
 
 UMBRAL_DISTANCIA_REGLAS_DEFAULT = 0.05
 TOP_RUNS_TO_MERGE_DEFAULT = 3
@@ -273,12 +274,14 @@ def rule_pretty_line(values, attribute_types):
 
 
 def enrich_rule_extra_metrics(rule, dataset_size):
-    """Add gain/leverage/wracc/conviction derived from supports."""
+    """Add gain/leverage/wracc/conviction/netconf/yule_q derived from supports."""
     extra = {
         "gain": None,
         "leverage": None,
         "wracc": None,
         "conviction": None,
+        "netconf": None,
+        "yule_q": None,
     }
     if (
         dataset_size is not None
@@ -313,7 +316,8 @@ def format_rule_metrics_line(rule):
         f"acc={fmt(rule.get('accuracy'))} | sup={fmt(rule.get('support_metric'))} | "
         f"cf={fmt(rule.get('cf'))} | gain={fmt(rule.get('gain'))} | "
         f"leverage={fmt(rule.get('leverage'))} | wracc={fmt(rule.get('wracc'))} | "
-        f"conviction={fmt(rule.get('conviction'))}"
+        f"conviction={fmt(rule.get('conviction'))} | netconf={fmt(rule.get('netconf'))} | "
+        f"yule_q={fmt(rule.get('yule_q'))}"
     )
 
 
@@ -774,7 +778,7 @@ def run_batch(args: argparse.Namespace) -> int:
 
     print(f"CSV: {csv_abs}")
     print(f"Salida (logs + graficas): {out_dir}")
-    print(f"Carreras: {n} | funcion objetivo (objf): {objf}")
+    print(f"Carreras: {n} | funcion objetivo (objf): {objf} | variant: {args.variant}")
     print(f"Ejecutable: {sys.executable} -u {main_cvoa}")
 
     failures = 0
@@ -783,19 +787,7 @@ def run_batch(args: argparse.Namespace) -> int:
         log = os.path.join(out_dir, f"run_{i}.txt")
         print(f"\n=== Run {i}/{n} ===")
 
-        cmd = [sys.executable, "-u", main_cvoa, csv_abs, objf, plot]
-        cmd.extend(["--amplitude-penalty", str(args.amplitude_penalty)])
-        if args.niching:
-            cmd.append("--niching")
-            cmd.extend(["--sharing-radius", str(args.sharing_radius)])
-            cmd.extend(["--sharing-alpha", str(args.sharing_alpha)])
-            cmd.extend(
-                ["--genotypic-distance-threshold", str(args.genotypic_distance_threshold)]
-            )
-            if args.max_per_structure is not None:
-                cmd.extend(["--max-per-structure", str(args.max_per_structure)])
-        else:
-            cmd.append("--no-niching")
+        cmd = [sys.executable, "-u", main_cvoa, csv_abs, objf, plot, "--variant", args.variant]
         with open(log, "w", encoding="utf-8", newline="\n") as logf:
             proc = subprocess.run(
                 cmd,
@@ -845,62 +837,21 @@ def build_parser():
         help=f"Carpeta para run_* y fitness_run_*.png (por defecto: <carpeta del csv>/runs_umbral)",
     )
     p_batch.add_argument("--num-runs", type=int, default=30, metavar="N", help="Numero de corridas")
-    p_batch.add_argument("--objf", default="1", help="Argumento objf de main_cvoa (default: 1)")
+    p_batch.add_argument(
+        "--objf",
+        default="1",
+        help="Funcion objetivo de main_cvoa: 1, 2 o 3 (default: 1)",
+    )
+    p_batch.add_argument(
+        "--variant",
+        choices=VARIANT_CHOICES,
+        default=DEFAULT_VARIANT,
+        help=variant_help_text(),
+    )
     p_batch.add_argument(
         "--no-summary",
         action="store_true",
         help="No ejecutar el resumen/reglas despues del batch",
-    )
-    p_batch.add_argument(
-        "--niching",
-        dest="niching",
-        action="store_true",
-        default=True,
-        help="Activar niching estructural dinamico en CVOA (default: on)",
-    )
-    p_batch.add_argument(
-        "--no-niching",
-        dest="niching",
-        action="store_false",
-        help="Desactivar niching estructural dinamico",
-    )
-    p_batch.add_argument(
-        "--sharing-radius",
-        type=float,
-        default=0.5,
-        metavar="SIGMA",
-        help="Radio de fitness sharing (distancia Jaccard estructural, default: 0.5)",
-    )
-    p_batch.add_argument(
-        "--sharing-alpha",
-        type=float,
-        default=1.0,
-        metavar="A",
-        help="Exponente de la funcion de sharing (default: 1.0)",
-    )
-    p_batch.add_argument(
-        "--max-per-structure",
-        type=int,
-        default=None,
-        metavar="K",
-        help="Maximo de reglas elite con la misma estructura de atributos",
-    )
-    p_batch.add_argument(
-        "--genotypic-distance-threshold",
-        type=float,
-        default=0.25,
-        metavar="D",
-        help="Distancia estructural minima para preferir otro donante de infeccion",
-    )
-    p_batch.add_argument(
-        "--amplitude-penalty",
-        type=float,
-        default=0.35,
-        metavar="W",
-        help=(
-            "Penalizar intervalos activos anchos: fitness *= 1 - W * mean_width "
-            "(default: 0.35; 0 desactiva)"
-        ),
     )
     add_summary_arguments(p_batch)
 

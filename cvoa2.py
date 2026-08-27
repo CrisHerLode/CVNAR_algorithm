@@ -1,9 +1,10 @@
 from copy import deepcopy
-import numpy as np
-import sys as sys
-import random as random
-from individual import Individual
 
+import numpy as np
+import random
+import sys
+
+from individual import Individual
 from niching import (
     apply_fitness_sharing,
     count_structure_in_archive,
@@ -39,6 +40,9 @@ class CVOA:
         genotypic_distance_threshold=0.25,
         structural_dedup_umbral=0.08,
         amplitude_penalty=0.35,
+        amplitude_support_low=0.10,
+        amplitude_support_high=0.80,
+        amplitude_width_power=2.0,
     ):
         self.infected = []
         self.recovered = []
@@ -64,14 +68,31 @@ class CVOA:
         )
         self.genotypic_distance_threshold = float(genotypic_distance_threshold)
         self.structural_dedup_umbral = float(structural_dedup_umbral)
-        # Penalize wide / catch-all active intervals (data assumed normalized to [0,1])
+        # Penalize wide / catch-all active intervals (data assumed normalized to [0,1]).
+        # Weight is always adaptive in rule support when amplitude_penalty > 0.
         self.amplitude_penalty = max(0.0, float(amplitude_penalty))
+        self.amplitude_support_low = float(amplitude_support_low)
+        self.amplitude_support_high = float(amplitude_support_high)
+        self.amplitude_width_power = max(1e-6, float(amplitude_width_power))
+        if self.amplitude_support_high < self.amplitude_support_low:
+            self.amplitude_support_low, self.amplitude_support_high = (
+                self.amplitude_support_high,
+                self.amplitude_support_low,
+            )
+
+    # --- fitness helpers / elite archive ---
 
     def _raw_fitness_of(self, individual):
         raw = getattr(individual, "raw_fitness", None)
         if raw is not None:
             return raw
         return self.fitness(individual.values, individual.attributeType)
+
+    def _store_copy(self, candidate, cand_raw):
+        stored = deepcopy(candidate)
+        stored.raw_fitness = cand_raw
+        stored.fitness = cand_raw
+        return stored
 
     def es_regla_distinta(self, nuevo_individuo, umbral_distancia=None):
         """
@@ -84,7 +105,9 @@ class CVOA:
             return True
 
         for regla_top in self.bestSolutions:
-            misma_estructura = np.array_equal(nuevo_individuo.attributeType, regla_top.attributeType)
+            misma_estructura = np.array_equal(
+                nuevo_individuo.attributeType, regla_top.attributeType
+            )
             distancia = self.calcular_distancia(nuevo_individuo.values, regla_top.values)
             if misma_estructura and distancia < umbral_distancia:
                 return False
@@ -111,10 +134,7 @@ class CVOA:
 
         if n_same < self.max_per_structure:
             if len(self.bestSolutions) < self.n_solutions:
-                stored = deepcopy(candidate)
-                stored.raw_fitness = cand_raw
-                stored.fitness = cand_raw
-                self.bestSolutions.append(stored)
+                self.bestSolutions.append(self._store_copy(candidate, cand_raw))
             else:
                 peor_idx = min(
                     range(len(self.bestSolutions)),
@@ -122,10 +142,7 @@ class CVOA:
                 )
                 peor_fit = self._raw_fitness_of(self.bestSolutions[peor_idx])
                 if cand_raw > peor_fit:
-                    stored = deepcopy(candidate)
-                    stored.raw_fitness = cand_raw
-                    stored.fitness = cand_raw
-                    self.bestSolutions[peor_idx] = stored
+                    self.bestSolutions[peor_idx] = self._store_copy(candidate, cand_raw)
                 else:
                     return False
         else:
@@ -134,10 +151,7 @@ class CVOA:
                 return False
             worst_fit = self._raw_fitness_of(worst_ind)
             if cand_raw > worst_fit:
-                stored = deepcopy(candidate)
-                stored.raw_fitness = cand_raw
-                stored.fitness = cand_raw
-                self.bestSolutions[worst_idx] = stored
+                self.bestSolutions[worst_idx] = self._store_copy(candidate, cand_raw)
             else:
                 return False
 
@@ -147,6 +161,8 @@ class CVOA:
             reverse=True,
         )
         return True
+
+    # --- disease propagation ---
 
     def _pick_infection_donor(self, ranked_infected, current_idx):
         """
@@ -163,9 +179,58 @@ class CVOA:
         for cand in window:
             if cand is current:
                 continue
-            if structural_distance(current.attributeType, cand.attributeType) >= self.genotypic_distance_threshold:
+            if structural_distance(
+                current.attributeType, cand.attributeType
+            ) >= self.genotypic_distance_threshold:
                 return cand
         return current
+
+    def _is_new_candidate(self, ind, new_infected_list):
+        return (
+            ind not in self.deaths
+            and ind not in self.infected
+            and ind not in new_infected_list
+            and ind not in self.recovered
+        )
+
+    def _try_add_infected(self, ind, new_infected_list):
+        """Add a fresh infection or reinfect from recovered (same RNG order as before)."""
+        if self._is_new_candidate(ind, new_infected_list):
+            new_infected_list.append(ind)
+            return
+        if ind in self.recovered and ind not in new_infected_list:
+            if random.random() < self.P_REINFECTION:
+                new_infected_list.append(ind)
+                self.recovered.remove(ind)
+
+    def _try_isolate(self, ind, new_infected_list):
+        if self._is_new_candidate(ind, new_infected_list):
+            self.recovered.append(ind)
+
+    def _spread_from_individual(self, x, i, idx_super_spreader, time, new_infected_list):
+        if i < idx_super_spreader:
+            ninfected = self.MIN_SUPERSPREAD + random.randint(
+                0, self.MAX_SUPERSPREAD - self.MIN_SUPERSPREAD
+            )
+        else:
+            ninfected = random.randint(0, self.MAX_SPREAD)
+
+        traveler = random.random() < self.P_TRAVEL
+        if traveler:
+            travel_distance = random.randint(1, int(self.size / 2))
+        else:
+            travel_distance = 1
+
+        donor = self._pick_infection_donor(self.infected, i)
+        for _j in range(ninfected):
+            new_infected = donor.infect(travel_distance=travel_distance)
+            if time < self.SOCIAL_DISTANCING:
+                self._try_add_infected(new_infected, new_infected_list)
+            else:
+                if random.random() > self.P_ISOLATION:
+                    self._try_add_infected(new_infected, new_infected_list)
+                else:
+                    self._try_isolate(new_infected, new_infected_list)
 
     def propagateDisease(self, time):
         new_infected_list = []
@@ -216,75 +281,22 @@ class CVOA:
             idx_deaths = len(self.infected) - (self.DEATH_PERC * len(self.infected))
 
         # Step 5. Disease propagation (ordered by shared fitness when niching is on).
-        i = 0
         still_infected = []
-        for x in list(self.infected):
+        for i, x in enumerate(list(self.infected)):
             if i >= idx_deaths:
                 self.deaths.append(x)
             else:
                 still_infected.append(x)
-                if i < idx_super_spreader:
-                    ninfected = self.MIN_SUPERSPREAD + random.randint(
-                        0, self.MAX_SUPERSPREAD - self.MIN_SUPERSPREAD
-                    )
-                else:
-                    ninfected = random.randint(0, self.MAX_SPREAD)
-                traveler = random.random() < self.P_TRAVEL
-                if traveler:
-                    travel_distance = random.randint(1, int(self.size / 2))
-                else:
-                    travel_distance = 1
-
-                donor = self._pick_infection_donor(self.infected, i)
-                for j in range(ninfected):
-                    new_infected = donor.infect(travel_distance=travel_distance)
-                    if time < self.SOCIAL_DISTANCING:
-                        if (
-                            new_infected not in self.deaths
-                            and new_infected not in self.infected
-                            and new_infected not in new_infected_list
-                            and new_infected not in self.recovered
-                        ):
-                            new_infected_list.append(new_infected)
-                        elif new_infected in self.recovered and new_infected not in new_infected_list:
-                            if random.random() < self.P_REINFECTION:
-                                new_infected_list.append(new_infected)
-                                self.recovered.remove(new_infected)
-                    else:
-                        if random.random() > self.P_ISOLATION:
-                            if (
-                                new_infected not in self.deaths
-                                and new_infected not in self.infected
-                                and new_infected not in new_infected_list
-                                and new_infected not in self.recovered
-                            ):
-                                new_infected_list.append(new_infected)
-                            elif new_infected in self.recovered and new_infected not in new_infected_list:
-                                if random.random() < self.P_REINFECTION:
-                                    new_infected_list.append(new_infected)
-                                    self.recovered.remove(new_infected)
-                        else:
-                            if (
-                                new_infected not in self.deaths
-                                and new_infected not in self.infected
-                                and new_infected not in new_infected_list
-                                and new_infected not in self.recovered
-                            ):
-                                self.recovered.append(new_infected)
-            i += 1
+                self._spread_from_individual(
+                    x, i, idx_super_spreader, time, new_infected_list
+                )
 
         self.recovered.extend(still_infected)
         self.infected = new_infected_list
 
-    def run(self):
-        epidemic = True
-        time = 0
+    # --- run loop ---
 
-        patience = max(3, int(self.max_time * 0.20))
-        consecutive_stable_iterations = 0
-        epsilon = 1e-6
-        best_fitness_history = []
-
+    def _print_variant_banner(self):
         if self.niching:
             print(
                 "Niching ON: fitness_sharing "
@@ -296,14 +308,21 @@ class CVOA:
             print("Niching OFF")
         if self.amplitude_penalty > 0:
             print(
-                f"Amplitude penalty ON: weight={self.amplitude_penalty} "
-                "(fitness *= 1 - w * mean_active_interval_width)"
+                f"Amplitude penalty ON (adaptive): weight_max={self.amplitude_penalty}, "
+                f"support_low={self.amplitude_support_low}, "
+                f"support_high={self.amplitude_support_high}, "
+                f"width_power={self.amplitude_width_power} "
+                "(fitness *= 1 - W_eff(support) * mean_width**power)"
             )
         else:
             print("Amplitude penalty OFF")
 
+    def _init_patient_zero(self):
         pz = Individual.random(self.data)
-        while Individual.validateAttributeTypes(pz, pz.attributeType) == 0 or self.fitness(pz.values, pz.attributeType) == 0:
+        while (
+            Individual.validateAttributeTypes(pz, pz.attributeType) == 0
+            or self.fitness(pz.values, pz.attributeType) == 0
+        ):
             pz = Individual.random(self.data)
         pz.fitness = self.fitness(pz.values, pz.attributeType)
         pz.raw_fitness = pz.fitness
@@ -312,6 +331,63 @@ class CVOA:
         print("Patient Zero attribute values: " + str(pz.values) + "\n")
         print("Patient Zero attribute type: " + str(pz.attributeType) + "\n")
         self.try_insert_best_solution(pz)
+        return pz
+
+    def _print_iteration_status(self, time, current_best_fitness):
+        print("Iteration ", (time + 1))
+        print("Best fitness so far: ", current_best_fitness)
+        print("Best individual: ", self.bestSolutions[0].kintegers)
+        if self.niching:
+            n_structs = len(
+                {structure_fingerprint(x.attributeType) for x in self.bestSolutions}
+            )
+            print(
+                f"Elite structures: {n_structs}/{len(self.bestSolutions)} "
+                f"(max_per_structure={self.max_per_structure})"
+            )
+        print(
+            "Infected: ",
+            str(len(self.infected)),
+            "; Recovered: ",
+            str(len(self.recovered)),
+            "; Deaths: ",
+            str(len(self.deaths)),
+        )
+        print(
+            "Recovered/Infected: "
+            + str(
+                "{:.4f}".format(
+                    100 * ((len(self.recovered)) / (len(self.infected) + 0.01))
+                )
+                + "%"
+            )
+        )
+
+    def _update_early_stop(self, best_fitness_history, consecutive_stable_iterations, epsilon, patience):
+        """Return (epidemic_continues, consecutive_stable_iterations)."""
+        if len(best_fitness_history) <= 1:
+            return True, consecutive_stable_iterations
+        improvement = best_fitness_history[-1] - best_fitness_history[-2]
+        if improvement < epsilon:
+            consecutive_stable_iterations += 1
+        else:
+            consecutive_stable_iterations = 0
+        if consecutive_stable_iterations >= patience:
+            print("Fitness se ha estabilizado. Parando el proceso.")
+            return False, consecutive_stable_iterations
+        return True, consecutive_stable_iterations
+
+    def run(self):
+        epidemic = True
+        time = 0
+
+        patience = max(3, int(self.max_time * 0.20))
+        consecutive_stable_iterations = 0
+        epsilon = 1e-6
+        best_fitness_history = []
+
+        self._print_variant_banner()
+        self._init_patient_zero()
 
         while epidemic and time < self.max_time:
             self.propagateDisease(time)
@@ -322,38 +398,14 @@ class CVOA:
 
             current_best_fitness = self._raw_fitness_of(self.bestSolutions[0])
             best_fitness_history.append(current_best_fitness)
+            self._print_iteration_status(time, current_best_fitness)
 
-            print("Iteration ", (time + 1))
-            print("Best fitness so far: ", current_best_fitness)
-            print("Best individual: ", self.bestSolutions[0].kintegers)
-            if self.niching:
-                n_structs = len({structure_fingerprint(x.attributeType) for x in self.bestSolutions})
-                print(
-                    f"Elite structures: {n_structs}/{len(self.bestSolutions)} "
-                    f"(max_per_structure={self.max_per_structure})"
-                )
-            print(
-                "Infected: ",
-                str(len(self.infected)),
-                "; Recovered: ",
-                str(len(self.recovered)),
-                "; Deaths: ",
-                str(len(self.deaths)),
+            epidemic, consecutive_stable_iterations = self._update_early_stop(
+                best_fitness_history,
+                consecutive_stable_iterations,
+                epsilon,
+                patience,
             )
-            print(
-                "Recovered/Infected: "
-                + str("{:.4f}".format(100 * ((len(self.recovered)) / (len(self.infected) + 0.01))) + "%")
-            )
-
-            if len(best_fitness_history) > 1:
-                improvement = best_fitness_history[-1] - best_fitness_history[-2]
-                if improvement < epsilon:
-                    consecutive_stable_iterations += 1
-                else:
-                    consecutive_stable_iterations = 0
-                if consecutive_stable_iterations >= patience:
-                    print("Fitness se ha estabilizado. Parando el proceso.")
-                    epidemic = False
 
             if not self.infected:
                 epidemic = False
@@ -368,6 +420,8 @@ class CVOA:
 
     def getStdFitnessEachIt(self):
         return self.stddevEachIteration
+
+    # --- fitness / objectives ---
 
     def mean_active_interval_width(self, individual_values, individual_attributeType):
         """Mean width of antecedent/consequent intervals (normalized [0,1] space)."""
@@ -384,12 +438,27 @@ class CVOA:
             return 1.0
         return sum(widths) / float(len(widths))
 
-    def amplitude_multiplier(self, individual_values, individual_attributeType):
-        """Return factor in [1-w, 1]: narrower active intervals => closer to 1."""
-        if self.amplitude_penalty <= 0:
+    def effective_amplitude_weight(self, rule_support_frac):
+        """Adaptive W(support): 0 if low support, W_max if high support, linear in between."""
+        w_max = self.amplitude_penalty
+        if w_max <= 0:
+            return 0.0
+        s = max(0.0, min(1.0, float(rule_support_frac)))
+        lo = self.amplitude_support_low
+        hi = self.amplitude_support_high
+        if s <= lo:
+            return 0.0
+        if s >= hi or hi <= lo:
+            return w_max
+        return w_max * ((s - lo) / (hi - lo))
+
+    def amplitude_multiplier(self, individual_values, individual_attributeType, rule_support_frac=0.0):
+        """Return factor in [1-W_eff, 1]: narrower active intervals => closer to 1."""
+        w = self.effective_amplitude_weight(rule_support_frac)
+        if w <= 0:
             return 1.0
         mean_w = self.mean_active_interval_width(individual_values, individual_attributeType)
-        return 1.0 - self.amplitude_penalty * mean_w
+        return 1.0 - w * (mean_w ** self.amplitude_width_power)
 
     def fitness(self, individual_values, individual_attributeType):
         X = self.data.to_numpy(dtype=float, copy=False)
@@ -422,12 +491,19 @@ class CVOA:
 
         if self.objF == "1":
             base = self.objectiveFunc1(support_ant, support_cons, support_rule, conf)
+        elif self.objF == "3":
+            base = self.objectiveFunc3(support_ant, support_cons, support_rule, conf)
         else:
+            # objF "2" (and any legacy default)
             base = self.objectiveFunc2(support_ant, support_cons, support_rule, conf)
 
         if base == 0 or self.amplitude_penalty <= 0:
             return base
-        mult = self.amplitude_multiplier(individual_values, individual_attributeType)
+
+        rule_sup_frac = (support_rule / n_rows) if n_rows else 0.0
+        mult = self.amplitude_multiplier(
+            individual_values, individual_attributeType, rule_support_frac=rule_sup_frac
+        )
         # Narrower intervals must always score better (higher), including when base < 0.
         if base > 0:
             return base * mult
@@ -459,6 +535,21 @@ class CVOA:
             cf = 0
         support = support_rule / len(self.data.index)
         return cf + conf + support
+
+    def objectiveFunc3(self, support_ant, support_cons, support_rule, conf):
+        """fobj3: support + conf + netconf (VLMOHSNAR-oriented interest + coverage)."""
+        n = len(self.data.index)
+        if n == 0:
+            return 0.0
+        support = support_rule / n
+        p_ant = support_ant / n
+        p_cons = support_cons / n
+        leverage = support - (p_ant * p_cons)
+        den_net = p_ant * (1.0 - p_ant)
+        netconf = (leverage / den_net) if den_net > 1e-12 else 0.0
+        return support + conf + netconf
+
+    # --- distances / getters ---
 
     def avgBestFitnessDist(self):
         distancias = []

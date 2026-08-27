@@ -213,6 +213,8 @@ def evaluate_rules_on_csv(rules: list[dict], csv_path: Path) -> dict:
                 "wracc": m[10],
                 "conviction": m[11] if math.isfinite(m[11]) else None,
                 "conviction_inf": not math.isfinite(m[11]),
+                "netconf": m[12],
+                "yule_q": m[13],
             }
         )
 
@@ -241,6 +243,8 @@ def evaluate_rules_on_csv(rules: list[dict], csv_path: Path) -> dict:
         "mean_wracc": mean_metric("wracc"),
         "mean_conviction": st.mean(finite_conv) if finite_conv else 0.0,
         "conviction_inf_count": n_conv_inf,
+        "mean_netconf": mean_metric("netconf"),
+        "mean_yule_q": mean_metric("yule_q"),
         "lift_gt_1": sum(1 for row in metrics_rows if row["lift"] > 1.0),
         "conf_ge_08": sum(1 for row in metrics_rows if row["confidence"] >= 0.8),
     }
@@ -269,6 +273,7 @@ def print_external_eval(label: str, csv_path: Path, eval_stats: dict, emit=print
             if eval_stats.get("conviction_inf_count")
             else ""
         )
+        + f", netconf={eval_stats['mean_netconf']:.4f}, yule_q={eval_stats['mean_yule_q']:.4f}"
     )
     emit(
         f"- Reglas con lift>1: {eval_stats['lift_gt_1']} | "
@@ -297,6 +302,8 @@ def emit_metric_descriptions(emit=print) -> None:
     emit("- Leverage: P(AC) - P(A)P(C); dependencia positiva si >0.")
     emit("- WRAcc: P(A)*(conf - P(C)); clasico Lavrac (coincide con leverage).")
     emit("- Conviction: (1-P(C))/(1-conf); alto si la regla rara vez falla (inf si conf=1).")
+    emit("- Netconf: (P(AC)-P(A)P(C))/(P(A)*(1-P(A))); interes neto (estilo tablas VLMOHSNAR).")
+    emit("- Yule's Q: (ad-bc)/(ad+bc) en la tabla 2x2 de la regla; asociacion en [-1,1].")
     emit("")
 
 
@@ -567,6 +574,8 @@ def main() -> int:
             f"- Diferencia conviction media (finite): "
             f"{evb['mean_conviction'] - eva['mean_conviction']:+.4f}"
         )
+        emit(f"- Diferencia netconf medio: {evb['mean_netconf'] - eva['mean_netconf']:+.4f}")
+        emit(f"- Diferencia Yule's Q medio: {evb['mean_yule_q'] - eva['mean_yule_q']:+.4f}")
 
     emit("")
     emit_metric_descriptions(emit=emit)

@@ -9,22 +9,25 @@ Main entrypoint: `cvoa_multiobjetivo.py`
 ### 1) Run multiple stochastic executions (batch)
 
 ```bash
-python cvoa_multiobjetivo.py batch ./PATH_DATASET/NAME_DATASET.csv --out-dir ./PATH_OUTPUT/runs_umbral --num-runs 30 --objf 1
+python cvoa_multiobjetivo.py batch ./PATH_DATASET/NAME_DATASET.csv --out-dir ./PATH_OUTPUT/runs --num-runs 30 --objf 2 --variant niching-amp
 ```
 
-- `--objf`: objective function (`1` or `2`)
+- `--objf`: objective function (`1`, `2`, or `3`)
+  - `1` / `2`: paper objectives (unchanged)
+  - `3`: `support + conf + netconf` (coverage + interest; optional experiments)
 - `--num-runs`: number of runs
 - `--out-dir`: folder for `run_*.txt`, `fitness_run_*.png`, and merged top rules
+- `--variant`: algorithm mode (only these three):
+  - `base` — paper CVOA (no niching, no amplitude)
+  - `niching` — structural niching only
+  - `niching-amp` — niching + adaptive amplitude (`W=0.35`, support schedule 0.10→0.80, `width_power=2`; **default**)
 - optional: `--no-summary` to skip automatic summary after batch
-- **Dynamic niching (on by default in CVOA):** structural fitness sharing + elite niche capacity
-  - `--sharing-radius SIGMA` (default `0.5`, Jaccard structural distance)
-  - `--sharing-alpha A` (default `1.0`)
-  - `--max-per-structure K` (default `n_solutions//4`)
-  - `--genotypic-distance-threshold D` (default `0.25`)
-  - `--no-niching` to disable
-- **Amplitude penalty (on by default):** `fitness *= 1 - W * mean_active_interval_width`
-  - `--amplitude-penalty W` (default `0.35`; `0` disables)
-  - Prefer narrower (more specific) intervals during search; reported fitness includes this factor
+
+Single run:
+
+```bash
+python main_cvoa.py ./PATH_DATASET/NAME_DATASET.csv 2 ./out/fitness.png --variant niching-amp
+```
 
 ### 2) Summarize existing runs and generate final top rules
 
@@ -52,7 +55,7 @@ Generated top-rules file includes, for each rule:
 - rule text (`Rule: A... -> A...`)
 - origin run and fitness
 - per-rule metrics (`ant_sup`, `cons_sup`, `rule_sup`, `conf`, `lift`, `acc`, `sup`, `cf`,
-  `gain`, `leverage`, `wracc`, `conviction`)
+  `gain`, `leverage`, `wracc`, `conviction`, `netconf`, `yule_q`)
 
 ### 3) Compare two top-rule sets (e.g., objf1 vs objf2)
 
@@ -63,6 +66,18 @@ python comparar_top_reglas.py ./PATH_A/runs_umbral ./PATH_B/runs_umbral_fobj2 \
   --csv ./PATH_DATASET/NAME_DATASET.csv \
   --out-path ./PATH_REPORTS/comparacion_top_reglas.txt
 ```
+
+### 3c) Matrix compare: fobj × variants (base / niching / niching-amp)
+
+```bash
+python comparar_variantes.py ./BK --csv ./BK/BK.csv --objf 1 2 \
+  --out-path ./BK/reportes/comparacion_variantes_fobj12.txt
+```
+
+Writes by default `.txt`, `.csv` (`;`) and `.xlsx` (sheet `report`).
+Columns: `#R` / `Av*` / `ext_coverage_pct` / `div_uniq_struct` / `div_mean_struct_d`
+for fobj 1–2 × base / niching / niching-amp (estilo tabla VLMOHSNAR).
+Missing variants are listed and skipped.
 
 ### 3b) Single top-rule report (e.g., only objf2 when objf1 has no valid rules)
 

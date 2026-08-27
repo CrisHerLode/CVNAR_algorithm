@@ -4,7 +4,8 @@ def calcMetric(data, supports):
 
     Index map (kept stable for main_cvoa callers):
       0 conf, 1 lift, 2 leverage_norm, 3 accuracy, 4 support, 5 cf, 6 cf2,
-      7 leverage (P(AC)-P(A)P(C)), 8 accuracy2, 9 gain, 10 wracc, 11 conviction
+      7 leverage (P(AC)-P(A)P(C)), 8 accuracy2, 9 gain, 10 wracc, 11 conviction,
+      12 netconf, 13 yule_q
 
     Formulas (N = |data|):
       conf = P(C|A) = rule/ant
@@ -13,6 +14,8 @@ def calcMetric(data, supports):
       gain = conf - P(C)
       WRAcc = P(A) * (conf - P(C))   # classic Lavrac; equals leverage
       conviction = (1-P(C)) / (1-conf) if conf < 1 else +inf
+      netconf = (P(AC)-P(A)P(C)) / (P(A)*(1-P(A)))
+      Yule's Q = (ad-bc)/(ad+bc) with a=AC, b=A-AC, c=C-AC, d=N-A-C+AC
     """
     metrics = []
     support_ant = supports[0]
@@ -62,6 +65,25 @@ def calcMetric(data, supports):
     else:
         conviction = (1.0 - p_cons) / (1.0 - conf)
 
+    # Netconf (common NAR form used in VLMOHSNAR-style tables)
+    den_net = p_ant * (1.0 - p_ant)
+    if n and den_net > 1e-12:
+        netconf = (leverage_plain) / den_net
+    else:
+        netconf = 0.0
+
+    # Yule's Q from 2x2 contingency
+    a = float(support_rule)
+    b = float(support_ant - support_rule)
+    c = float(support_cons - support_rule)
+    d = float(n - support_ant - support_cons + support_rule) if n else 0.0
+    a = max(a, 0.0)
+    b = max(b, 0.0)
+    c = max(c, 0.0)
+    d = max(d, 0.0)
+    den_yule = a * d + b * c
+    yule_q = ((a * d - b * c) / den_yule) if den_yule > 0 else 0.0
+
     metrics.append(conf)
     metrics.append(lift)
     metrics.append(leverage_norm)
@@ -74,18 +96,22 @@ def calcMetric(data, supports):
     metrics.append(gain)
     metrics.append(wracc)
     metrics.append(conviction)
+    metrics.append(netconf)
+    metrics.append(yule_q)
 
     return metrics
 
 
 def metrics_from_supports(support_ant, support_cons, support_rule, n_rows):
-    """Derive gain/leverage/wracc/conviction from supports (for tops without CSV)."""
+    """Derive extra metrics from supports (for tops without reloading CSV)."""
     if not n_rows:
         return {
             "gain": None,
             "leverage": None,
             "wracc": None,
             "conviction": None,
+            "netconf": None,
+            "yule_q": None,
         }
     class _Dummy:
         index = range(n_rows)
@@ -96,4 +122,6 @@ def metrics_from_supports(support_ant, support_cons, support_rule, n_rows):
         "leverage": m[7],
         "wracc": m[10],
         "conviction": m[11],
+        "netconf": m[12],
+        "yule_q": m[13],
     }
