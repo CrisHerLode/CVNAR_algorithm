@@ -64,40 +64,15 @@ Per-folder outputs:
 - `top_reglas_base_fobjN.txt` (`--base`)
 - `top_reglas_minsup_fobjN.txt` (`--minsup`)
 
-### 3) Compare two top-rule sets (e.g., objf1 vs objf2)
-
-```bash
-python comparar_top_reglas.py ./PATH_A/runs_umbral ./PATH_B/runs_umbral_fobj2 \
-  --top-file-name-a top_reglas_finales_fobj1.txt \
-  --top-file-name-b top_reglas_finales_fobj2.txt \
-  --csv ./PATH_DATASET/NAME_DATASET.csv \
-  --out-path ./PATH_REPORTS/comparacion_top_reglas.txt
-```
-
-### 4) Matrix compare: fobj × variants (base / niching / niching-amp)
+### 3) Matrix compare: fobj × variants → Excel/CSV/TXT
 
 ```bash
 python comparar_variantes.py ./BK --csv ./BK/BK.csv --objf 1 2 \
-  --out-path ./BK/reportes/comparacion_variantes_fobj12.txt
+  --out-path ./BK/reportes/comparacion_variantes_fobj12
 ```
 
 Writes by default `.txt`, `.csv` (`;`) and `.xlsx` (sheet `report`).
 Columns: `#R` / `Av*` / `ext_coverage_pct` / `div_uniq_struct` / `div_mean_struct_d`
 for fobj 1–2 × base / niching / niching-amp (estilo tabla VLMOHSNAR).
+Uses each folder's `top_reglas_finales_fobjN.txt` by default.
 Missing variants are listed and skipped.
-
-### 5) Single top-rule report (e.g., only objf2 when objf1 has no valid rules)
-
-```bash
-python comparar_top_reglas.py ./PATH_OUTPUT/runs_umbral_fobj2 --solo \
-  --top-file-name-a top_reglas_finales_fobj2.txt \
-  --csv ./PATH_DATASET/NAME_DATASET.csv \
-  --out-path ./PATH_REPORTS/reporte_top_reglas_fobj2.txt
-```
-
-Comparison report includes:
-
-- structural metrics of rules
-- external evaluation (`coverage`, `confidence`, `lift`, `support`, `accuracy`, `cf`)
-- diversity metrics
-- optional Jaccard / interval-distance matrices

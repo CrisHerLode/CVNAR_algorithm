@@ -24,8 +24,11 @@ from types import SimpleNamespace
 
 from support_function import generate_rules
 from calc_metric_function import metrics_from_supports
-from comparar_top_reglas import parse_top_rules
-from comparar_variantes import collect_variant_row, printed_metric_averages
+from comparar_variantes import (
+    collect_variant_row,
+    parse_top_rules,
+    printed_metric_averages,
+)
 from main_cvoa import DEFAULT_VARIANT, VARIANT_CHOICES, variant_help_text
 from niching import structural_distance
 

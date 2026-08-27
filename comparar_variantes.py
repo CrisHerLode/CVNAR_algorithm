@@ -18,12 +18,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from comparar_top_reglas import (
-    evaluate_rules_on_csv,
-    parse_top_rules,
-    summarize_rules,
-)
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
+from calc_metric_function import calcMetric
 from niching import structural_distance, structure_fingerprint
+from support_function import calcRegCub, calcSupport
 
 VARIANT_CHOICES = ("base", "niching", "niching-amp")
 DEFAULT_VARIANTS = VARIANT_CHOICES
@@ -45,6 +46,188 @@ PRINTED_KEYS = (
     "yule_q",
     "sup",
 )
+
+RULE_RE = re.compile(
+    r"^\d+\.\s+Rule:\s+(.*?)\n\s+# fitness=([0-9.]+)\s+\|\s+run=([^\n]+)$",
+    re.MULTILINE | re.DOTALL,
+)
+ATTR_RE = re.compile(r"A(\d+)\s*\[([0-9.]+),([0-9.]+)\]")
+
+
+def parse_top_rules(path: Path) -> list[dict]:
+    txt = path.read_text(encoding="utf-8")
+    rules = []
+    for m in RULE_RE.finditer(txt):
+        rule_str, fit_str, run_name = m.groups()
+        ant_raw, cons_raw = [x.strip() for x in rule_str.split("->", 1)]
+        ant = [(int(a), float(lo), float(hi)) for a, lo, hi in ATTR_RE.findall(ant_raw)]
+        cons = [(int(a), float(lo), float(hi)) for a, lo, hi in ATTR_RE.findall(cons_raw)]
+        rules.append(
+            {
+                "rule": rule_str.strip(),
+                "fitness": float(fit_str),
+                "run": run_name.strip(),
+                "ant": ant,
+                "cons": cons,
+            }
+        )
+    return rules
+
+
+def summarize_rules(rules: list[dict]) -> dict:
+    if not rules:
+        return {"n": 0}
+
+    fits = [r["fitness"] for r in rules]
+    ant_sizes = [len(r["ant"]) for r in rules]
+    cons_sizes = [len(r["cons"]) for r in rules]
+
+    ant_counts: Counter = Counter()
+    cons_counts: Counter = Counter()
+    run_counts: Counter = Counter()
+
+    intervals = []
+    for r in rules:
+        run_counts[r["run"]] += 1
+        for a in r["ant"]:
+            ant_counts[a[0]] += 1
+            intervals.append((a[1], a[2]))
+        for a in r["cons"]:
+            cons_counts[a[0]] += 1
+            intervals.append((a[1], a[2]))
+
+    full_01 = sum(1 for lo, hi in intervals if lo == 0.0 and hi == 1.0)
+    narrow_05 = sum(1 for lo, hi in intervals if (hi - lo) <= 0.50)
+
+    return {
+        "n": len(rules),
+        "fit_mean": st.mean(fits),
+        "fit_min": min(fits),
+        "fit_max": max(fits),
+        "fit_sd": st.pstdev(fits),
+        "ant_avg": st.mean(ant_sizes),
+        "cons_avg": st.mean(cons_sizes),
+        "runs": dict(run_counts),
+        "ant_counts": dict(sorted(ant_counts.items())),
+        "cons_counts": dict(sorted(cons_counts.items())),
+        "intervals_total": len(intervals),
+        "interval_full_01": full_01,
+        "interval_full_01_pct": 100.0 * full_01 / len(intervals) if intervals else 0.0,
+        "interval_narrow_05": narrow_05,
+        "interval_narrow_05_pct": 100.0 * narrow_05 / len(intervals) if intervals else 0.0,
+    }
+
+
+def _normalize_dataframe(df: pd.DataFrame, exclude=None):
+    exclude = set(exclude or [])
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    cols_to_scale = [c for c in numeric_cols if c not in exclude]
+    scaler = MinMaxScaler()
+    df_scaled = df.copy()
+    if cols_to_scale:
+        df_scaled[cols_to_scale] = scaler.fit_transform(df[cols_to_scale])
+    return df_scaled
+
+
+def encode_rule_for_support(rule: dict, n_cols: int):
+    values = []
+    attr_types = []
+    for _ in range(n_cols):
+        values.extend([0.0, 1.0])
+        attr_types.extend([0, 0])
+
+    valid = True
+    for attr_idx, lo, hi in rule["ant"]:
+        if attr_idx >= n_cols:
+            valid = False
+            continue
+        values[attr_idx * 2] = lo
+        values[attr_idx * 2 + 1] = hi
+        attr_types[attr_idx * 2] = 1
+        attr_types[attr_idx * 2 + 1] = 1
+    for attr_idx, lo, hi in rule["cons"]:
+        if attr_idx >= n_cols:
+            valid = False
+            continue
+        values[attr_idx * 2] = lo
+        values[attr_idx * 2 + 1] = hi
+        attr_types[attr_idx * 2] = 2
+        attr_types[attr_idx * 2 + 1] = 2
+
+    return values, attr_types, valid
+
+
+def evaluate_rules_on_csv(rules: list[dict], csv_path: Path) -> dict:
+    data = pd.read_csv(csv_path, sep=";")
+    data = data.fillna(data.mean(numeric_only=True))
+    data = _normalize_dataframe(data, exclude=[])
+
+    n_cols = data.shape[1]
+    metrics_rows = []
+    values_set = []
+    types_set = []
+    invalid_rules = 0
+
+    for r in rules:
+        values, attr_types, valid = encode_rule_for_support(r, n_cols)
+        if not valid:
+            invalid_rules += 1
+        values_set.append(values)
+        types_set.append(attr_types)
+
+        supports = calcSupport(data, values, attr_types)
+        m = calcMetric(data, supports)
+        metrics_rows.append(
+            {
+                "support_ant": supports[0],
+                "support_cons": supports[1],
+                "support_rule": supports[2],
+                "confidence": m[0],
+                "lift": m[1],
+                "leverage_norm": m[2],
+                "accuracy": m[3],
+                "support": m[4],
+                "cf": m[5],
+                "leverage": m[7],
+                "gain": m[9],
+                "wracc": m[10],
+                "conviction": m[11] if math.isfinite(m[11]) else None,
+                "conviction_inf": not math.isfinite(m[11]),
+                "netconf": m[12],
+                "yule_q": m[13],
+            }
+        )
+
+    rules_cov = calcRegCub(data, values_set, types_set)
+    n_rows = len(data.index)
+
+    def mean_metric(key: str) -> float:
+        vals = [row[key] for row in metrics_rows if row.get(key) is not None]
+        return st.mean(vals) if vals else 0.0
+
+    finite_conv = [row["conviction"] for row in metrics_rows if row["conviction"] is not None]
+    n_conv_inf = sum(1 for row in metrics_rows if row["conviction_inf"])
+
+    return {
+        "n_rows": n_rows,
+        "invalid_rules": invalid_rules,
+        "coverage_records": rules_cov,
+        "coverage_pct": 100.0 * rules_cov / n_rows if n_rows else 0.0,
+        "mean_confidence": mean_metric("confidence"),
+        "mean_lift": mean_metric("lift"),
+        "mean_support": mean_metric("support"),
+        "mean_accuracy": mean_metric("accuracy"),
+        "mean_cf": mean_metric("cf"),
+        "mean_gain": mean_metric("gain"),
+        "mean_leverage": mean_metric("leverage"),
+        "mean_wracc": mean_metric("wracc"),
+        "mean_conviction": st.mean(finite_conv) if finite_conv else 0.0,
+        "conviction_inf_count": n_conv_inf,
+        "mean_netconf": mean_metric("netconf"),
+        "mean_yule_q": mean_metric("yule_q"),
+        "lift_gt_1": sum(1 for row in metrics_rows if row["lift"] > 1.0),
+        "conf_ge_08": sum(1 for row in metrics_rows if row["confidence"] >= 0.8),
+    }
 
 
 def default_run_dir(dataset_dir: Path, objf: str, variant: str) -> Path:
