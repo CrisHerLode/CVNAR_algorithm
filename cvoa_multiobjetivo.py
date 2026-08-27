@@ -1,11 +1,10 @@
 """
-CVOA multiobjetivo: lanzar multiples corridas (main_cvoa.py), resumen
-multiobjetivo (top_reglas_base_fobjN.txt) y/o postfilter (top_reglas_finales_fobjN.txt).
+CVOA multiobjetivo: batch de corridas + tops por carpeta de runs.
 
   python cvoa_multiobjetivo.py batch ./lo/LO.csv --out-dir ./lo/runs --num-runs 30 --variant niching-amp
+  python cvoa_multiobjetivo.py batch ./lo/LO.csv --out-dir ./lo/runs --num-runs 30 --base --minsup
   python cvoa_multiobjetivo.py resumen ./lo/runs
-  python cvoa_multiobjetivo.py postfilter BK
-  python cvoa_multiobjetivo.py postfilter BK --base --minsup
+  python cvoa_multiobjetivo.py resumen ./lo/runs --base --minsup
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ UMBRAL_DISTANCIA_REGLAS_DEFAULT = 0.05
 TOP_RUNS_TO_MERGE_DEFAULT = 3
 TOP_FINAL_RULES_DEFAULT = None
 # Naming: top_reglas_{finales|base|minsup}_fobj{N}.txt
-# finales = top final (protocolo definitivo); base = resumen clasico; minsup = postfilter support
+# finales = protocolo definitivo; base = resumen clasico; minsup = resumen con minsup alto
 OUTPUT_TOP_RULES_TXT_DEFAULT = "top_reglas_base.txt"
 LOG_GLOB_DEFAULT = "run_*.txt"
 MIN_LIFT_DEFAULT = 1.0
@@ -814,31 +813,34 @@ def run_batch(args: argparse.Namespace) -> int:
     if args.no_summary:
         return min(1, failures)
 
-    logs_dir_abs = out_dir
-    default_top = top_reglas_name("base", str(objf))
-    output_abs = (
-        os.path.abspath(args.output)
-        if args.output
-        else os.path.join(logs_dir_abs, default_top)
+    rc = finalize_batch_tops(
+        logs_dir=Path(out_dir),
+        csv_path=Path(csv_abs),
+        objf=str(objf),
+        do_definitive=not getattr(args, "no_definitive", False),
+        do_base=bool(getattr(args, "base", False)),
+        do_minsup=bool(getattr(args, "minsup", False)),
+        fracs=tuple(getattr(args, "fracs", None) or (0.05,)),
+        min_support_frac_def=float(getattr(args, "hybrid_support_frac", 0.05)),
+        min_netconf=float(getattr(args, "min_netconf", 0.25)),
+        min_struct_d=float(getattr(args, "min_struct_d", 0.5)),
+        summary_args=args,
     )
-
-    summary_ns = summary_namespace_from_args(args, logs_dir_abs, output_abs)
-    print("\n=== Resumen multiobjetivo (post-batch) ===\n")
-    rc = execute_summary(summary_ns)
     return rc if rc != 0 else min(1, failures)
 
 
-# --- postfilter / top definitivo ---
-
-REPO_ROOT = Path(__file__).resolve().parent
-POSTFILTER_VARIANT_DIRS = ("base", "niching", "niching_amp")
-POSTFILTER_OBJFS = ("1", "2")
-
+# --- tops por carpeta de runs (finales / base / minsup) ---
 
 def infer_objf_from_name(name: str):
     """Extract '2' from 'fobj2_niching' or 'runs_fobj2_base'."""
     m = re.search(r"fobj(\d+)", str(name))
     return m.group(1) if m else None
+
+
+def infer_csv_from_logs_dir(logs_dir: Path) -> Path:
+    """BK/runs_fobj2_niching -> BK/BK.csv"""
+    parent = Path(logs_dir).resolve().parent
+    return parent / "{}.csv".format(parent.name)
 
 
 def top_reglas_name(kind: str, objf: str, min_support_frac=None) -> str:
@@ -855,7 +857,7 @@ def top_reglas_name(kind: str, objf: str, min_support_frac=None) -> str:
     return "top_reglas_{}_fobj{}.txt".format(kind, objf)
 
 
-def postfilter_out_name(objf: str, min_support_frac: float = None) -> str:
+def minsup_out_name(objf: str, min_support_frac: float = None) -> str:
     return top_reglas_name("minsup", objf, min_support_frac)
 
 
@@ -867,17 +869,125 @@ def base_out_name(objf: str) -> str:
     return top_reglas_name("base", objf)
 
 
-def discover_variant_dirs(dataset: Path) -> list:
-    found = []
-    for objf in POSTFILTER_OBJFS:
-        for variant in POSTFILTER_VARIANT_DIRS:
-            name = "fobj{}_{}".format(objf, variant)
-            logs_dir = dataset / "runs_{}".format(name)
-            if logs_dir.is_dir() and list(logs_dir.glob("run_*.txt")):
-                found.append((name, logs_dir))
-            else:
-                print("AVISO: omitido (sin runs): {}".format(logs_dir))
-    return found
+def add_tops_arguments(p):
+    """Flags shared by batch and resumen for which tops to write."""
+    p.add_argument(
+        "--base",
+        action="store_true",
+        help="Tambien generar top_reglas_base_fobjN.txt (resumen clasico)",
+    )
+    p.add_argument(
+        "--minsup",
+        action="store_true",
+        help="Tambien generar top_reglas_minsup_fobjN.txt",
+    )
+    p.add_argument(
+        "--no-definitive",
+        action="store_true",
+        help="No generar top_reglas_finales (solo --base / --minsup)",
+    )
+    p.add_argument(
+        "--fracs",
+        nargs="+",
+        type=float,
+        default=[0.05],
+        help="Fracciones min-support para --minsup (default: 0.05)",
+    )
+    p.add_argument("--min-netconf", type=float, default=0.25)
+    p.add_argument("--hybrid-support-frac", type=float, default=0.05)
+    p.add_argument(
+        "--min-struct-d",
+        type=float,
+        default=0.5,
+        help="Distancia Jaccard minima del top finales (default 0.5)",
+    )
+    p.add_argument(
+        "--dataset-csv",
+        default=None,
+        dest="dataset_csv",
+        help="CSV del dataset (para top finales; por defecto: <padre>/<padre>.csv)",
+    )
+
+
+def finalize_batch_tops(
+    *,
+    logs_dir: Path,
+    csv_path: Path,
+    objf: str,
+    do_definitive: bool = True,
+    do_base: bool = False,
+    do_minsup: bool = False,
+    fracs=(0.05,),
+    min_support_frac_def: float = 0.05,
+    min_netconf: float = 0.25,
+    min_struct_d: float = 0.5,
+    summary_args=None,
+) -> int:
+    """Write top_reglas_finales (default) and optionally base/minsup for one runs folder."""
+    logs_dir = Path(logs_dir)
+    csv_path = Path(csv_path)
+    rc = 0
+
+    if do_base:
+        out_base = logs_dir / base_out_name(objf)
+        if (
+            summary_args is not None
+            and getattr(summary_args, "output", None)
+            and not do_definitive
+            and not do_minsup
+        ):
+            out_base = Path(os.path.abspath(summary_args.output))
+        print("\n=== TOP BASE (resumen clasico) -> {} ===".format(out_base.name))
+        if summary_args is not None:
+            ns = summary_namespace_from_args(
+                summary_args, str(logs_dir.resolve()), str(out_base.resolve())
+            )
+            r = execute_summary(ns)
+        else:
+            r = run_resumen_minsup(logs_dir, out_base, MIN_SUPPORT_FRAC_DEFAULT)
+        if r != 0:
+            rc = r
+            print("AVISO: top base fallo ({})".format(r))
+
+    if do_minsup:
+        print("\n=== TOP MINSUP {} ===".format(list(fracs)))
+        for frac in fracs:
+            out_ms = logs_dir / minsup_out_name(objf, frac)
+            r = run_resumen_minsup(logs_dir, out_ms, frac)
+            if r != 0:
+                rc = r
+                print("AVISO: top minsup fallo ({}) para {}".format(r, out_ms.name))
+
+    if do_definitive:
+        if not csv_path.is_file():
+            print(
+                "No se encuentra CSV para top finales: {}".format(csv_path),
+                file=sys.stderr,
+            )
+            return 1 if rc == 0 else rc
+        n_rows = infer_n_rows(csv_path)
+        out_fin = logs_dir / definitive_out_name(objf)
+        print(
+            "\n=== TOP FINALES (definitivo) -> {} "
+            "(sup>={:.2f}, nc>={:.2f}, struct_d>={:.2f}) ===".format(
+                out_fin.name, min_support_frac_def, min_netconf, min_struct_d
+            )
+        )
+        select_definitive_top(
+            [logs_dir],
+            out_path=out_fin,
+            dataset_size=n_rows,
+            min_support_frac=min_support_frac_def,
+            min_netconf=min_netconf,
+            min_struct_d=min_struct_d,
+        )
+        if out_fin.is_file():
+            summarize_top("finales", out_fin, csv_path)
+        else:
+            print("AVISO: no se genero {}".format(out_fin))
+            rc = 1 if rc == 0 else rc
+
+    return rc
 
 
 def infer_n_rows(csv_path: Path) -> int:
@@ -1124,198 +1234,27 @@ def summarize_top(label: str, top_path: Path, csv_path: Path) -> None:
     )
 
 
-def write_definitive_per_folder(
-    dataset: Path,
-    *,
-    out_dir: Path,
-    dataset_size: int,
-    min_support_frac: float,
-    min_netconf: float,
-    min_struct_d: float,
-):
-    written = []
-    print(
-        "\n=== TOP FINAL por carpeta "
-        "(sup>={:.2f}, nc>={:.2f}, struct_d>={:.2f}) ===".format(
-            min_support_frac, min_netconf, min_struct_d
-        )
-    )
-    for name, logs_dir in discover_variant_dirs(dataset):
-        objf = infer_objf_from_name(name) or "?"
-        fname = definitive_out_name(objf)
-        local_out = logs_dir / fname
-        select_definitive_top(
-            [logs_dir],
-            out_path=local_out,
-            dataset_size=dataset_size,
-            min_support_frac=min_support_frac,
-            min_netconf=min_netconf,
-            min_struct_d=min_struct_d,
-        )
-        if not local_out.is_file():
-            print("AVISO: no se genero para {}".format(name))
-            continue
-        report_out = out_dir / "top_reglas_finales_{}.txt".format(name)
-        report_out.write_text(local_out.read_text(encoding="utf-8"), encoding="utf-8")
-        written.append(local_out)
-        written.append(report_out)
-        print("OK: {}".format(local_out))
-    return written
-
-
-def run_postfilter(args: argparse.Namespace) -> int:
-    # Default: definitive top. Opt-in extras: --base (classic finales) and --minsup.
-    do_definitive = not getattr(args, "no_definitive", False)
-    do_minsup = bool(getattr(args, "minsup", False))
-    do_base = bool(getattr(args, "base", False))
-    # Legacy aliases (suppressed in help)
-    if getattr(args, "definitive_only", False) or getattr(args, "hybrid_only", False):
-        do_definitive = True
-        do_minsup = False
-        do_base = False
-    if getattr(args, "definitive", False) or getattr(args, "hybrid", False):
-        do_definitive = True
-
-    dataset = Path(args.dataset)
-    if not dataset.is_absolute():
-        dataset = REPO_ROOT / dataset
-    out_dir = (
-        Path(args.out_dir)
-        if args.out_dir
-        else dataset / "reportes" / "postfilter_hibrido"
-    )
-    if not out_dir.is_absolute():
-        out_dir = REPO_ROOT / out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    csv_path = dataset / "{}.csv".format(dataset.name)
-    if not csv_path.is_file():
-        print("No se encuentra CSV: {}".format(csv_path), file=sys.stderr)
-        return 1
-
-    variants = discover_variant_dirs(dataset)
-    if not variants:
-        print("No hay carpetas runs_fobj* con logs.", file=sys.stderr)
-        return 1
-
-    fracs = tuple(args.fracs)
-    written = []
-
-    if do_base:
-        print(
-            "=== TOP BASE (resumen clasico, minsup-frac={}) sobre {} ===".format(
-                MIN_SUPPORT_FRAC_DEFAULT, dataset.name
-            )
-        )
-        for name, logs_dir in variants:
-            objf = infer_objf_from_name(name) or "?"
-            local_out = logs_dir / base_out_name(objf)
-            report_out = out_dir / "top_reglas_base_{}.txt".format(name)
-            rc = run_resumen_minsup(logs_dir, local_out, MIN_SUPPORT_FRAC_DEFAULT)
-            if rc != 0:
-                print("AVISO: resumen base fallo ({}) para {}".format(rc, local_out))
-                continue
-            if local_out.is_file():
-                report_out.write_text(
-                    local_out.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-                written.append(local_out)
-                print("OK: {}  (+ copia {})".format(local_out.name, report_out.name))
-            else:
-                print("AVISO: sin fichero base para {}".format(name))
-
-    if do_minsup:
-        print(
-            "=== POST-FILTRO min-support-frac {} sobre {} ===".format(
-                list(fracs), dataset.name
-            )
-        )
-        for name, logs_dir in variants:
-            objf = infer_objf_from_name(name) or "?"
-            for frac in fracs:
-                local_out = logs_dir / postfilter_out_name(objf, frac)
-                report_out = out_dir / "top_reglas_minsup_{}.txt".format(name)
-                rc = run_resumen_minsup(logs_dir, local_out, frac)
-                if rc != 0:
-                    print("AVISO: resumen fallo ({}) para {}".format(rc, local_out))
-                    continue
-                if local_out.is_file():
-                    report_out.write_text(
-                        local_out.read_text(encoding="utf-8"), encoding="utf-8"
-                    )
-                    written.append(local_out)
-                    print(
-                        "OK: {}  (+ copia {})".format(
-                            local_out.name, report_out.name
-                        )
-                    )
-                else:
-                    print(
-                        "AVISO: sin reglas / sin fichero para {} minsup={:.2f}".format(
-                            name, frac
-                        )
-                    )
-
-    if do_definitive:
-        n_rows = infer_n_rows(csv_path)
-        written.extend(
-            write_definitive_per_folder(
-                dataset,
-                out_dir=out_dir,
-                dataset_size=n_rows,
-                min_support_frac=args.hybrid_support_frac,
-                min_netconf=args.min_netconf,
-                min_struct_d=args.min_struct_d,
-            )
-        )
-
-    if do_base or do_minsup or do_definitive:
-        print("\n=== COMPARATIVA RAPIDA ===")
-        for name, logs_dir in variants:
-            objf = infer_objf_from_name(name) or "?"
-            if do_base:
-                summarize_top(
-                    "{} (base)".format(name),
-                    logs_dir / base_out_name(objf),
-                    csv_path,
-                )
-            if do_minsup:
-                for frac in fracs:
-                    summarize_top(
-                        "{} minsup={:.2f}".format(name, frac),
-                        logs_dir / postfilter_out_name(objf, frac),
-                        csv_path,
-                    )
-            if do_definitive:
-                summarize_top(
-                    "{} finales".format(name),
-                    logs_dir / definitive_out_name(objf),
-                    csv_path,
-                )
-
-    print("\nCopias en: {}".format(out_dir))
-    print("Ficheros generados/actualizados: {}".format(len(written)))
-    return 0
-
-
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "CVOA multiobjetivo: `batch` (N corridas + resumen), "
-            "`resumen` (logs) o `postfilter` (top definitivo por defecto)."
+            "CVOA multiobjetivo: `batch` (N corridas + top finales) o "
+            "`resumen` (regenerar tops sobre una carpeta de runs)."
         ),
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_batch = sub.add_parser(
         "batch",
-        help="Ejecutar N veces main_cvoa.py sobre un CSV y, por defecto, resumen multiobjetivo.",
+        help=(
+            "Ejecutar N veces main_cvoa.py y, por defecto, generar "
+            "top_reglas_finales_fobjN.txt (protocolo definitivo)."
+        ),
     )
     p_batch.add_argument("csv", help="Path al archivo CSV (; como separador, como main_cvoa)")
     p_batch.add_argument(
         "--out-dir",
         default=None,
-        help=f"Carpeta para run_* y fitness_run_*.png (por defecto: <carpeta del csv>/runs_umbral)",
+        help="Carpeta para run_* y fitness_run_*.png (por defecto: <carpeta del csv>/runs_umbral)",
     )
     p_batch.add_argument("--num-runs", type=int, default=30, metavar="N", help="Numero de corridas")
     p_batch.add_argument(
@@ -1332,76 +1271,62 @@ def build_parser():
     p_batch.add_argument(
         "--no-summary",
         action="store_true",
-        help="No ejecutar el resumen/reglas despues del batch",
+        help="No generar ningun top despues del batch",
     )
+    add_tops_arguments(p_batch)
     add_summary_arguments(p_batch)
 
     p_res = sub.add_parser(
         "resumen",
-        help="Solo resumen estadistico y top reglas desde una carpeta de logs existente.",
+        help=(
+            "Regenerar tops sobre UNA carpeta de runs "
+            "(por defecto: top_reglas_finales_fobjN.txt)."
+        ),
     )
     p_res.add_argument(
-        "dataset",
-        metavar="DATASET",
+        "runs_dir",
+        metavar="RUNS_DIR",
         help="Carpeta con run_*.txt (salida tipica del batch)",
     )
+    add_tops_arguments(p_res)
     add_summary_arguments(p_res)
 
-    p_pf = sub.add_parser(
-        "postfilter",
-        help=(
-            "TOP DEFINITIVO por carpeta (default). "
-            "Opcional: --base y/o --minsup para tops adicionales."
-        ),
-    )
-    p_pf.add_argument(
-        "dataset",
-        help="Carpeta del dataset (p.ej. BK, BL) con runs_fobj*_* y CSV homonimo",
-    )
-    p_pf.add_argument(
-        "--out-dir",
-        default=None,
-        help="Copias de reportes (por defecto: <dataset>/reportes/postfilter_hibrido)",
-    )
-    p_pf.add_argument(
-        "--base",
-        action="store_true",
-        help=(
-            "Tambien regenerar top_reglas_base_fobjN.txt "
-            "(resumen clasico con minsup por defecto)"
-        ),
-    )
-    p_pf.add_argument(
-        "--minsup",
-        action="store_true",
-        help="Tambien generar top_reglas_minsup_fobjN.txt",
-    )
-    p_pf.add_argument(
-        "--no-definitive",
-        action="store_true",
-        help="No generar el top definitivo (solo --base / --minsup)",
-    )
-    p_pf.add_argument(
-        "--fracs",
-        nargs="+",
-        type=float,
-        default=[0.05],
-        help="Fracciones min-support para --minsup (default: 0.05)",
-    )
-    p_pf.add_argument("--definitive", action="store_true", help=argparse.SUPPRESS)
-    p_pf.add_argument("--definitive-only", action="store_true", help=argparse.SUPPRESS)
-    p_pf.add_argument("--hybrid", action="store_true", help=argparse.SUPPRESS)
-    p_pf.add_argument("--hybrid-only", action="store_true", help=argparse.SUPPRESS)
-    p_pf.add_argument("--min-netconf", type=float, default=0.25)
-    p_pf.add_argument("--hybrid-support-frac", type=float, default=0.05)
-    p_pf.add_argument(
-        "--min-struct-d",
-        type=float,
-        default=0.5,
-        help="Distancia Jaccard estructural minima entre reglas del top (default 0.5)",
-    )
-
     return parser
+
+
+def run_resumen(args: argparse.Namespace) -> int:
+    logs_dir = Path(os.path.abspath(args.runs_dir))
+    if not logs_dir.is_dir():
+        print("No existe la carpeta de runs: {}".format(logs_dir), file=sys.stderr)
+        return 2
+
+    objf = infer_objf_from_name(logs_dir.name) or infer_objf_from_name(str(logs_dir))
+    if not objf:
+        print(
+            "No se pudo inferir fobj del nombre de carpeta; usa una ruta "
+            "tipo runs_fobj2_niching.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if getattr(args, "dataset_csv", None):
+        csv_path = Path(os.path.abspath(args.dataset_csv))
+    else:
+        csv_path = infer_csv_from_logs_dir(logs_dir)
+
+    return finalize_batch_tops(
+        logs_dir=logs_dir,
+        csv_path=csv_path,
+        objf=str(objf),
+        do_definitive=not getattr(args, "no_definitive", False),
+        do_base=bool(getattr(args, "base", False)),
+        do_minsup=bool(getattr(args, "minsup", False)),
+        fracs=tuple(getattr(args, "fracs", None) or (0.05,)),
+        min_support_frac_def=float(getattr(args, "hybrid_support_frac", 0.05)),
+        min_netconf=float(getattr(args, "min_netconf", 0.25)),
+        min_struct_d=float(getattr(args, "min_struct_d", 0.5)),
+        summary_args=args,
+    )
 
 
 def main(argv=None):
@@ -1415,21 +1340,7 @@ def main(argv=None):
         return run_batch(args)
 
     if args.cmd == "resumen":
-        logs_dir_abs = os.path.abspath(args.dataset)
-        objf = infer_objf_from_name(os.path.basename(logs_dir_abs))
-        default_top = (
-            top_reglas_name("base", objf) if objf else OUTPUT_TOP_RULES_TXT_DEFAULT
-        )
-        output_abs = (
-            os.path.abspath(args.output)
-            if args.output
-            else os.path.join(logs_dir_abs, default_top)
-        )
-        summary_ns = summary_namespace_from_args(args, logs_dir_abs, output_abs)
-        return execute_summary(summary_ns)
-
-    if args.cmd == "postfilter":
-        return run_postfilter(args)
+        return run_resumen(args)
 
     return 2
 

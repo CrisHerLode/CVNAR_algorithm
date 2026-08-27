@@ -12,16 +12,26 @@ Main entrypoint: `cvoa_multiobjetivo.py`
 python cvoa_multiobjetivo.py batch ./PATH_DATASET/NAME_DATASET.csv --out-dir ./PATH_OUTPUT/runs --num-runs 30 --objf 2 --variant niching-amp
 ```
 
+After the runs, by default writes **`top_reglas_finales_fobjN.txt`** in that same runs folder
+(definitive protocol: support ≥ 0.05 → netconf ≥ 0.25 → structural diversity).
+
+```bash
+# Also write classic base and/or minsup tops in the same folder
+python cvoa_multiobjetivo.py batch ./PATH_DATASET/NAME_DATASET.csv --out-dir ./PATH_OUTPUT/runs --num-runs 30 --objf 2 --variant niching-amp --base --minsup
+```
+
 - `--objf`: objective function (`1`, `2`, or `3`)
   - `1` / `2`: paper objectives (unchanged)
   - `3`: `support + conf + netconf` (coverage + interest; optional experiments)
 - `--num-runs`: number of runs
-- `--out-dir`: folder for `run_*.txt`, `fitness_run_*.png`, and merged top rules
+- `--out-dir`: folder for `run_*.txt`, `fitness_run_*.png`, and top rules
 - `--variant`: algorithm mode (only these three):
   - `base` — paper CVOA (no niching, no amplitude)
   - `niching` — structural niching only
   - `niching-amp` — niching + adaptive amplitude (`W=0.35`, support schedule 0.10→0.80, `width_power=2`; **default**)
-- optional: `--no-summary` to skip automatic summary after batch
+- `--base` / `--minsup`: also write `top_reglas_base_fobjN.txt` / `top_reglas_minsup_fobjN.txt`
+- `--no-definitive`: skip finales (only base/minsup if requested)
+- `--no-summary`: skip all post-run tops
 
 Single run:
 
@@ -29,56 +39,32 @@ Single run:
 python main_cvoa.py ./PATH_DATASET/NAME_DATASET.csv 2 ./out/fitness.png --variant niching-amp
 ```
 
-### 2) Summarize existing runs and generate final top rules
+### 2) Regenerar tops sobre una carpeta de runs (`resumen`)
 
-```bash
-python cvoa_multiobjetivo.py resumen ./PATH_OUTPUT/runs_umbral --output ./PATH_OUTPUT/top_reglas_base_fobj2.txt
-```
-
-Useful options:
-
-- `--merge-runs K`: how many top runs are merged
-- `--top-rules N`: final number of rules (default: detected automatically from `N solutions` in logs)
-- `--umbral-distancia EPS`: dedup threshold on active intervals for same `attribute_type` (default: `0.05`); exact printed duplicates and rules that only differ by `[0,1]` literals are always dropped
-- `--max-per-structure-top K`: max final rules sharing the same non-`[0,1]` attribute/role fingerprint (default: `2`)
-- Ranking prefers higher fitness, then fewer catch-all `[0,1]` conditions
-- Ranking weights for runs: `0.30*fitness + 0.30*coverage + 0.40*diversity`
-- `--output FILE`: output filename/path (default: `top_reglas_base_fobjN.txt` if the folder name contains `fobjN`)
-- **Quality filter (on by default):** drops catch-all rules (`[0,1]` intervals), rules with `lift <= 1`, and rules with low support
-- `--min-lift L`: minimum lift (default: `1.0`, strict `>`)
-- `--min-support-frac F`: minimum support as dataset fraction (default: `0.02`, at least 2 rows)
-- `--min-rule-support N`: absolute minimum support in rows (overrides fraction)
-- `--no-quality-filter`: disable quality filtering (legacy behaviour)
-
-Generated top-rules file includes, for each rule:
-
-- rule text (`Rule: A... -> A...`)
-- origin run and fitness
-- per-rule metrics (`ant_sup`, `cons_sup`, `rule_sup`, `conf`, `lift`, `acc`, `sup`, `cf`,
-  `gain`, `leverage`, `wracc`, `conviction`, `netconf`, `yule_q`)
-
-### 3) Post-filter / definitive top (per dataset runs folders)
-
-Over a dataset folder with `runs_fobj{1,2}_{base,niching,niching_amp}`:
+Same tops as the post-batch step, without re-running CVOA. Works on **one** `runs_*` folder only:
 
 ```bash
 # Default: top_reglas_finales_fobjN.txt
-python cvoa_multiobjetivo.py postfilter BK
+python cvoa_multiobjetivo.py resumen ./PATH_OUTPUT/runs_fobj2_niching
 
-# Also regenerate base and/or minsup
-python cvoa_multiobjetivo.py postfilter BK --base --minsup
-python cvoa_multiobjetivo.py postfilter BL --minsup --fracs 0.05 --no-definitive
+# Also base and/or minsup
+python cvoa_multiobjetivo.py resumen ./PATH_OUTPUT/runs_fobj2_niching --base --minsup
+
+# Only classic base (skip finales)
+python cvoa_multiobjetivo.py resumen ./PATH_OUTPUT/runs_fobj2_niching --no-definitive --base -o ./PATH_OUTPUT/top_reglas_base_fobj2.txt
 ```
 
-Per `runs_*` folder (same naming style):
+- Infers `fobj` from the folder name (`runs_fobj2_...`)
+- CSV for finales: parent/`<parent>.csv`, or `--dataset-csv PATH`
+- Summary knobs for `--base` / `--minsup`: `--merge-runs`, `--top-rules`, `--min-support-frac`, etc.
 
-- `top_reglas_finales_fobjN.txt` (default) — protocol definitivo
-- `top_reglas_base_fobjN.txt` (`--base`) — resumen clasico
+Per-folder outputs:
+
+- `top_reglas_finales_fobjN.txt` (default)
+- `top_reglas_base_fobjN.txt` (`--base`)
 - `top_reglas_minsup_fobjN.txt` (`--minsup`)
 
-Report copies: `<dataset>/reportes/postfilter_hibrido/top_reglas_finales_fobj2_niching.txt`, etc.
-
-### 4) Compare two top-rule sets (e.g., objf1 vs objf2)
+### 3) Compare two top-rule sets (e.g., objf1 vs objf2)
 
 ```bash
 python comparar_top_reglas.py ./PATH_A/runs_umbral ./PATH_B/runs_umbral_fobj2 \
@@ -88,7 +74,7 @@ python comparar_top_reglas.py ./PATH_A/runs_umbral ./PATH_B/runs_umbral_fobj2 \
   --out-path ./PATH_REPORTS/comparacion_top_reglas.txt
 ```
 
-### 5) Matrix compare: fobj × variants (base / niching / niching-amp)
+### 4) Matrix compare: fobj × variants (base / niching / niching-amp)
 
 ```bash
 python comparar_variantes.py ./BK --csv ./BK/BK.csv --objf 1 2 \
@@ -100,7 +86,7 @@ Columns: `#R` / `Av*` / `ext_coverage_pct` / `div_uniq_struct` / `div_mean_struc
 for fobj 1–2 × base / niching / niching-amp (estilo tabla VLMOHSNAR).
 Missing variants are listed and skipped.
 
-### 6) Single top-rule report (e.g., only objf2 when objf1 has no valid rules)
+### 5) Single top-rule report (e.g., only objf2 when objf1 has no valid rules)
 
 ```bash
 python comparar_top_reglas.py ./PATH_OUTPUT/runs_umbral_fobj2 --solo \
@@ -113,17 +99,5 @@ Comparison report includes:
 
 - structural metrics of rules
 - external evaluation (`coverage`, `confidence`, `lift`, `support`, `accuracy`, `cf`)
-- automatic diagnosis
-- metric glossary (`Significado de Metricas`)
-
-Output options:
-
-- `--out-path`: full output path (recommended)
-- `--out-name`: filename in dataset root (used when `--out-path` is not provided)
-
-## Direct single run (legacy)
-
-```bash
-python -u main_cvoa.py ./PATH_DATASET/NAME_DATASET.csv 1 ./PATH_OUTPUT/fitness_run_1.png > ./PATH_OUTPUT/run_1.txt
-```
-
+- diversity metrics
+- optional Jaccard / interval-distance matrices
